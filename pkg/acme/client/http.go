@@ -19,10 +19,13 @@ package client
 import (
 	"fmt"
 	"net/http"
+	"net/http/httputil"
 	"strings"
 	"time"
 
 	"github.com/jetstack/cert-manager/pkg/metrics"
+
+	logf "github.com/jetstack/cert-manager/pkg/logs"
 )
 
 // This file implements a custom instrumented HTTP client round tripper that
@@ -41,6 +44,24 @@ type Transport struct {
 	wrappedRT http.RoundTripper
 }
 
+type DebuggingTransport struct {
+	wrappedRT http.RoundTripper
+}
+
+type debugRequestInfo struct {
+	RequestVerb    string
+	RequestURL     string
+	RequestDump    []byte
+	RequestHeaders http.Header
+
+	ResponseStatus  string
+	ResponseHeaders http.Header
+	ResponseErr     error
+	ResponseDump    []byte
+
+	Duration time.Duration
+}
+
 // NewInstrumentedClient takes a *http.Client and returns a *http.Client that
 // has its RoundTripper wrapped with instrumentation.
 func NewInstrumentedClient(metrics *metrics.Metrics, client *http.Client) *http.Client {
@@ -57,6 +78,25 @@ func NewInstrumentedClient(metrics *metrics.Metrics, client *http.Client) *http.
 		wrappedRT: client.Transport,
 		metrics:   metrics,
 	}
+
+	return client
+}
+
+func NewDebuggingClient(client *http.Client) *http.Client {
+	// If next client is not defined we'll use http.DefaultClient.
+	if client == nil {
+		client = http.DefaultClient
+	}
+
+	if client.Transport == nil {
+		client.Transport = http.DefaultTransport
+	}
+
+	dt := &DebuggingTransport{
+		wrappedRT: client.Transport,
+	}
+
+	client.Transport = dt
 
 	return client
 }
@@ -99,4 +139,56 @@ func pathProcessor(path string) string {
 		p = p[:3]
 	}
 	return strings.Join(p, "/")
+}
+
+func newDebugRequestInfo(req *http.Request) *debugRequestInfo {
+	dump, _ := httputil.DumpRequestOut(req, true)
+
+	return &debugRequestInfo{
+		RequestURL:     req.URL.String(),
+		RequestVerb:    req.Method,
+		RequestHeaders: req.Header,
+		RequestDump:    dump,
+	}
+}
+
+func (r *debugRequestInfo) complete(response *http.Response, err error) {
+	dump, _ := httputil.DumpResponse(response, true)
+
+	r.ResponseStatus = response.Status
+	r.ResponseHeaders = response.Header
+	r.ResponseDump = dump
+}
+
+func (r *debugRequestInfo) toCurl() string {
+	headers := ""
+	for key, values := range r.RequestHeaders {
+		for _, value := range values {
+			headers += fmt.Sprintf(` -H %q`, fmt.Sprintf("%s: %s", key, value))
+		}
+	}
+
+	return fmt.Sprintf("curl -k -v -X%s %s '%s'", r.RequestVerb, headers, r.RequestURL)
+}
+
+func (dt *DebuggingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	reqInfo := newDebugRequestInfo(req)
+
+	logf.V(logf.TraceLevel).Infof("%s", reqInfo.toCurl())
+	logf.V(logf.TraceLevel).Infof("%s\n", reqInfo.RequestDump)
+
+	startTime := time.Now()
+	response, err := dt.wrappedRT.RoundTrip(req)
+	reqInfo.Duration = time.Since(startTime)
+
+	reqInfo.complete(response, err)
+
+	if logf.V(logf.DebugLevel).Enabled() && !logf.V(logf.TraceLevel).Enabled() {
+		logf.V(logf.DebugLevel).Infof("%s %s %s in %d milliseconds", reqInfo.RequestVerb, reqInfo.RequestURL, reqInfo.ResponseStatus, reqInfo.Duration.Nanoseconds()/int64(time.Millisecond))
+	} else {
+		logf.V(logf.TraceLevel).Infof("Response Status: %s in %d milliseconds", reqInfo.ResponseStatus, reqInfo.Duration.Nanoseconds()/int64(time.Millisecond))
+		logf.V(logf.TraceLevel).Infof("%s\n", reqInfo.ResponseDump)
+	}
+
+	return response, err
 }

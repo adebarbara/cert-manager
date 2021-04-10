@@ -51,7 +51,7 @@ func NewClient(client *http.Client, config cmacme.ACMEIssuer, privateKey *rsa.Pr
 // In future, we may change to having two global HTTP clients - one that ignores
 // TLS connection errors, and the other that does not.
 func BuildHTTPClient(metrics *metrics.Metrics, skipTLSVerify bool) *http.Client {
-	return acmecl.NewInstrumentedClient(metrics,
+	return acmecl.NewDebuggingClient(acmecl.NewInstrumentedClient(metrics,
 		&http.Client{
 			Transport: &http.Transport{
 				Proxy: http.ProxyFromEnvironment,
@@ -66,5 +66,6 @@ func BuildHTTPClient(metrics *metrics.Metrics, skipTLSVerify bool) *http.Client 
 				ExpectContinueTimeout: 1 * time.Second,
 			},
 			Timeout: time.Second * 30,
-		})
+		}),
+	)
 }
