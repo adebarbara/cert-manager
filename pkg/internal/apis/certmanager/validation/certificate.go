@@ -27,6 +27,7 @@ import (
 
 	"github.com/jetstack/cert-manager/pkg/api/util"
 	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
+	"github.com/jetstack/cert-manager/pkg/internal/api/validation"
 	internalcmapi "github.com/jetstack/cert-manager/pkg/internal/apis/certmanager"
 	cmmeta "github.com/jetstack/cert-manager/pkg/internal/apis/meta"
 )
@@ -68,6 +69,8 @@ func ValidateCertificateSpec(crt *internalcmapi.CertificateSpec, fldPath *field.
 			if crt.PrivateKey.Size > 0 && crt.PrivateKey.Size != 256 && crt.PrivateKey.Size != 384 && crt.PrivateKey.Size != 521 {
 				el = append(el, field.NotSupported(fldPath.Child("privateKey", "size"), crt.PrivateKey.Size, []string{"256", "384", "521"}))
 			}
+		case internalcmapi.Ed25519KeyAlgorithm:
+			break
 		default:
 			el = append(el, field.Invalid(fldPath.Child("privateKey", "algorithm"), crt.PrivateKey.Algorithm, "must be either empty or one of rsa or ecdsa"))
 		}
@@ -79,20 +82,25 @@ func ValidateCertificateSpec(crt *internalcmapi.CertificateSpec, fldPath *field.
 	if len(crt.Usages) > 0 {
 		el = append(el, validateUsages(crt, fldPath)...)
 	}
+	if crt.RevisionHistoryLimit != nil && *crt.RevisionHistoryLimit < 1 {
+		el = append(el, field.Invalid(fldPath.Child("revisionHistoryLimit"), *crt.RevisionHistoryLimit, "must not be less than 1"))
+	}
 
 	return el
 }
 
-func ValidateCertificate(_ *admissionv1.AdmissionRequest, obj runtime.Object) field.ErrorList {
+func ValidateCertificate(a *admissionv1.AdmissionRequest, obj runtime.Object) (field.ErrorList, validation.WarningList) {
 	crt := obj.(*internalcmapi.Certificate)
 	allErrs := ValidateCertificateSpec(&crt.Spec, field.NewPath("spec"))
-	return allErrs
+	w := validateAPIVersion(a.RequestKind)
+	return allErrs, w
 }
 
-func ValidateUpdateCertificate(_ *admissionv1.AdmissionRequest, oldObj, obj runtime.Object) field.ErrorList {
+func ValidateUpdateCertificate(a *admissionv1.AdmissionRequest, oldObj, obj runtime.Object) (field.ErrorList, validation.WarningList) {
 	crt := obj.(*internalcmapi.Certificate)
 	allErrs := ValidateCertificateSpec(&crt.Spec, field.NewPath("spec"))
-	return allErrs
+	w := validateAPIVersion(a.RequestKind)
+	return allErrs, w
 }
 
 func validateIssuerRef(issuerRef cmmeta.ObjectReference, fldPath *field.Path) field.ErrorList {
@@ -161,18 +169,16 @@ func ValidateDuration(crt *internalcmapi.CertificateSpec, fldPath *field.Path) f
 	el := field.ErrorList{}
 
 	duration := util.DefaultCertDuration(crt.Duration)
-	renewBefore := cmapi.DefaultRenewBefore
-	if crt.RenewBefore != nil {
-		renewBefore = crt.RenewBefore.Duration
-	}
 	if duration < cmapi.MinimumCertificateDuration {
 		el = append(el, field.Invalid(fldPath.Child("duration"), duration, fmt.Sprintf("certificate duration must be greater than %s", cmapi.MinimumCertificateDuration)))
 	}
-	if renewBefore < cmapi.MinimumRenewBefore {
-		el = append(el, field.Invalid(fldPath.Child("renewBefore"), renewBefore, fmt.Sprintf("certificate renewBefore must be greater than %s", cmapi.MinimumRenewBefore)))
+	// If spec.renewBefore is set, check that it is not less than the minimum.
+	if crt.RenewBefore != nil && crt.RenewBefore.Duration < cmapi.MinimumRenewBefore {
+		el = append(el, field.Invalid(fldPath.Child("renewBefore"), crt.RenewBefore.Duration, fmt.Sprintf("certificate renewBefore must be greater than %s", cmapi.MinimumRenewBefore)))
 	}
-	if duration <= renewBefore {
-		el = append(el, field.Invalid(fldPath.Child("renewBefore"), renewBefore, fmt.Sprintf("certificate duration %s must be greater than renewBefore %s", duration, renewBefore)))
+	// If spec.renewBefore is set, it must be less than the duration.
+	if crt.RenewBefore != nil && crt.RenewBefore.Duration >= duration {
+		el = append(el, field.Invalid(fldPath.Child("renewBefore"), crt.RenewBefore.Duration, fmt.Sprintf("certificate duration %s must be greater than renewBefore %s", duration, crt.RenewBefore.Duration)))
 	}
 	return el
 }

@@ -18,23 +18,24 @@ package acme
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
 	"fmt"
+	"time"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 
+	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
+	cmacme "github.com/jetstack/cert-manager/pkg/apis/acme/v1"
 	v1 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
 	"github.com/jetstack/cert-manager/test/e2e/framework"
 	"github.com/jetstack/cert-manager/test/e2e/util"
 	"github.com/jetstack/cert-manager/test/unit/gen"
 )
-
-const invalidACMEURL = "http://not-a-real-acme-url.com"
-const testingACMEEmail = "test@example.com"
-const testingACMEEmailAlternative = "another-test@example.com"
-const testingACMEPrivateKey = "test-acme-private-key"
 
 var _ = framework.CertManagerDescribe("ACME Issuer", func() {
 	f := framework.NewDefaultFramework("create-acme-issuer")
@@ -44,16 +45,16 @@ var _ = framework.CertManagerDescribe("ACME Issuer", func() {
 	AfterEach(func() {
 		By("Cleaning up")
 		f.CertManagerClientSet.CertmanagerV1().Issuers(f.Namespace.Name).Delete(context.TODO(), issuerName, metav1.DeleteOptions{})
-		f.KubeClientSet.CoreV1().Secrets(f.Namespace.Name).Delete(context.TODO(), testingACMEPrivateKey, metav1.DeleteOptions{})
+		f.KubeClientSet.CoreV1().Secrets(f.Namespace.Name).Delete(context.TODO(), f.Config.Addons.ACMEServer.TestingACMEPrivateKey, metav1.DeleteOptions{})
 	})
 
 	It("should register ACME account", func() {
 		acmeIssuer := gen.Issuer(issuerName,
 			gen.SetIssuerNamespace(f.Namespace.Name),
-			gen.SetIssuerACMEEmail(testingACMEEmail),
+			gen.SetIssuerACMEEmail(f.Config.Addons.ACMEServer.TestingACMEEmail),
 			gen.SetIssuerACMEURL(f.Config.Addons.ACMEServer.URL),
 			gen.SetIssuerACMESkipTLSVerify(true),
-			gen.SetIssuerACMEPrivKeyRef(testingACMEPrivateKey))
+			gen.SetIssuerACMEPrivKeyRef(f.Config.Addons.ACMEServer.TestingACMEPrivateKey))
 		By("Creating an Issuer")
 		_, err := f.CertManagerClientSet.CertmanagerV1().Issuers(f.Namespace.Name).Create(context.TODO(), acmeIssuer, metav1.CreateOptions{})
 		Expect(err).NotTo(HaveOccurred())
@@ -79,7 +80,7 @@ var _ = framework.CertManagerDescribe("ACME Issuer", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		By("Verifying ACME account private key exists")
-		secret, err := f.KubeClientSet.CoreV1().Secrets(f.Namespace.Name).Get(context.TODO(), testingACMEPrivateKey, metav1.GetOptions{})
+		secret, err := f.KubeClientSet.CoreV1().Secrets(f.Namespace.Name).Get(context.TODO(), f.Config.Addons.ACMEServer.TestingACMEPrivateKey, metav1.GetOptions{})
 		Expect(err).NotTo(HaveOccurred())
 		if len(secret.Data) != 1 {
 			Fail("Expected 1 key in ACME account private key secret, but there was %d", len(secret.Data))
@@ -89,10 +90,10 @@ var _ = framework.CertManagerDescribe("ACME Issuer", func() {
 	It("should recover a lost ACME account URI", func() {
 		acmeIssuer := gen.Issuer(issuerName,
 			gen.SetIssuerNamespace(f.Namespace.Name),
-			gen.SetIssuerACMEEmail(testingACMEEmail),
+			gen.SetIssuerACMEEmail(f.Config.Addons.ACMEServer.TestingACMEEmail),
 			gen.SetIssuerACMEURL(f.Config.Addons.ACMEServer.URL),
 			gen.SetIssuerACMESkipTLSVerify(true),
-			gen.SetIssuerACMEPrivKeyRef(testingACMEPrivateKey))
+			gen.SetIssuerACMEPrivKeyRef(f.Config.Addons.ACMEServer.TestingACMEPrivateKey))
 		By("Creating an Issuer")
 		_, err := f.CertManagerClientSet.CertmanagerV1().Issuers(f.Namespace.Name).Create(context.TODO(), acmeIssuer, metav1.CreateOptions{})
 		Expect(err).NotTo(HaveOccurred())
@@ -120,7 +121,7 @@ var _ = framework.CertManagerDescribe("ACME Issuer", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		By("Verifying ACME account private key exists")
-		secret, err := f.KubeClientSet.CoreV1().Secrets(f.Namespace.Name).Get(context.TODO(), testingACMEPrivateKey, metav1.GetOptions{})
+		secret, err := f.KubeClientSet.CoreV1().Secrets(f.Namespace.Name).Get(context.TODO(), f.Config.Addons.ACMEServer.TestingACMEPrivateKey, metav1.GetOptions{})
 		Expect(err).NotTo(HaveOccurred())
 
 		if len(secret.Data) != 1 {
@@ -134,10 +135,10 @@ var _ = framework.CertManagerDescribe("ACME Issuer", func() {
 		By("Recreating the Issuer")
 		acmeIssuer = gen.Issuer(issuerName,
 			gen.SetIssuerNamespace(f.Namespace.Name),
-			gen.SetIssuerACMEEmail(testingACMEEmail),
+			gen.SetIssuerACMEEmail(f.Config.Addons.ACMEServer.TestingACMEEmail),
 			gen.SetIssuerACMEURL(f.Config.Addons.ACMEServer.URL),
 			gen.SetIssuerACMESkipTLSVerify(true),
-			gen.SetIssuerACMEPrivKeyRef(testingACMEPrivateKey))
+			gen.SetIssuerACMEPrivKeyRef(f.Config.Addons.ACMEServer.TestingACMEPrivateKey))
 		_, err = f.CertManagerClientSet.CertmanagerV1().Issuers(f.Namespace.Name).Create(context.TODO(), acmeIssuer, metav1.CreateOptions{})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -169,10 +170,10 @@ var _ = framework.CertManagerDescribe("ACME Issuer", func() {
 	It("should fail to register an ACME account", func() {
 		acmeIssuer := gen.Issuer(issuerName,
 			gen.SetIssuerNamespace(f.Namespace.Name),
-			gen.SetIssuerACMEEmail(testingACMEEmail),
-			gen.SetIssuerACMEURL(invalidACMEURL),
+			gen.SetIssuerACMEEmail(f.Config.Addons.ACMEServer.TestingACMEEmail),
+			gen.SetIssuerACMEURL(f.Config.Addons.ACMEServer.InvalidACMEURL),
 			gen.SetIssuerACMESkipTLSVerify(true),
-			gen.SetIssuerACMEPrivKeyRef(testingACMEPrivateKey))
+			gen.SetIssuerACMEPrivKeyRef(f.Config.Addons.ACMEServer.TestingACMEPrivateKey))
 
 		By("Creating an Issuer with an invalid server")
 		_, err := f.CertManagerClientSet.CertmanagerV1().Issuers(f.Namespace.Name).Create(context.TODO(), acmeIssuer, metav1.CreateOptions{})
@@ -191,10 +192,10 @@ var _ = framework.CertManagerDescribe("ACME Issuer", func() {
 	It("should handle updates to the email field", func() {
 		acmeIssuer := gen.Issuer(issuerName,
 			gen.SetIssuerNamespace(f.Namespace.Name),
-			gen.SetIssuerACMEEmail(testingACMEEmail),
+			gen.SetIssuerACMEEmail(f.Config.Addons.ACMEServer.TestingACMEEmail),
 			gen.SetIssuerACMEURL(f.Config.Addons.ACMEServer.URL),
 			gen.SetIssuerACMESkipTLSVerify(true),
-			gen.SetIssuerACMEPrivKeyRef(testingACMEPrivateKey))
+			gen.SetIssuerACMEPrivKeyRef(f.Config.Addons.ACMEServer.TestingACMEPrivateKey))
 
 		By("Creating an Issuer")
 		acmeIssuer, err := f.CertManagerClientSet.CertmanagerV1().Issuers(f.Namespace.Name).Create(context.TODO(), acmeIssuer, metav1.CreateOptions{})
@@ -221,7 +222,7 @@ var _ = framework.CertManagerDescribe("ACME Issuer", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		By("Verifying ACME account private key exists")
-		secret, err := f.KubeClientSet.CoreV1().Secrets(f.Namespace.Name).Get(context.TODO(), testingACMEPrivateKey, metav1.GetOptions{})
+		secret, err := f.KubeClientSet.CoreV1().Secrets(f.Namespace.Name).Get(context.TODO(), f.Config.Addons.ACMEServer.TestingACMEPrivateKey, metav1.GetOptions{})
 		Expect(err).NotTo(HaveOccurred())
 		if len(secret.Data) != 1 {
 			Fail("Expected 1 key in ACME account private key secret, but there was %d", len(secret.Data))
@@ -232,7 +233,7 @@ var _ = framework.CertManagerDescribe("ACME Issuer", func() {
 			acmeIssuer.Name,
 			func(i *v1.Issuer) (bool, error) {
 				registeredEmail := i.GetStatus().ACMEStatus().LastRegisteredEmail
-				if registeredEmail == testingACMEEmail {
+				if registeredEmail == f.Config.Addons.ACMEServer.TestingACMEEmail {
 					return true, nil
 				}
 				return false, nil
@@ -242,7 +243,7 @@ var _ = framework.CertManagerDescribe("ACME Issuer", func() {
 		By("Changing the email field")
 		acmeIssuer, err = f.CertManagerClientSet.CertmanagerV1().Issuers(f.Namespace.Name).Get(context.TODO(), acmeIssuer.Name, metav1.GetOptions{})
 		Expect(err).NotTo(HaveOccurred())
-		acmeIssuer.Spec.ACME.Email = testingACMEEmailAlternative
+		acmeIssuer.Spec.ACME.Email = f.Config.Addons.ACMEServer.TestingACMEEmailAlternative
 		acmeIssuer, err = f.CertManagerClientSet.CertmanagerV1().Issuers(f.Namespace.Name).Update(context.TODO(), acmeIssuer, metav1.UpdateOptions{})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -260,11 +261,82 @@ var _ = framework.CertManagerDescribe("ACME Issuer", func() {
 			acmeIssuer.Name,
 			func(i *v1.Issuer) (bool, error) {
 				registeredEmail := i.GetStatus().ACMEStatus().LastRegisteredEmail
-				if registeredEmail == testingACMEEmailAlternative {
+				if registeredEmail == f.Config.Addons.ACMEServer.TestingACMEEmailAlternative {
 					return true, nil
 				}
 				return false, nil
 			})
 		Expect(err).NotTo(HaveOccurred())
+	})
+	It("ACME account with External Account Binding", func() {
+
+		By("providing the legacy keyAlgorithm value")
+
+		var (
+			secretName = "test-secret"
+			keyID      = "kid-1"
+			key        = "kid-secret-1"
+		)
+
+		keyBytes := []byte(base64.RawURLEncoding.EncodeToString([]byte(key)))
+		s := gen.Secret(secretName,
+			gen.SetSecretNamespace(f.Namespace.Name),
+			gen.SetSecretData(map[string][]byte{
+				"key": keyBytes,
+			}))
+		_, err := f.KubeClientSet.CoreV1().Secrets(f.Namespace.Name).Create(context.TODO(), s, metav1.CreateOptions{})
+		Expect(err).NotTo(HaveOccurred())
+
+		acmeIssuer := gen.Issuer(issuerName,
+			gen.SetIssuerNamespace(f.Namespace.Name),
+			gen.SetIssuerACMEEmail(f.Config.Addons.ACMEServer.TestingACMEEmail),
+			gen.SetIssuerACMEURL(f.Config.Addons.ACMEServer.URL),
+			gen.SetIssuerACMESkipTLSVerify(true),
+			gen.SetIssuerACMEPrivKeyRef(f.Config.Addons.ACMEServer.TestingACMEPrivateKey),
+			gen.SetIssuerACMEEABWithKeyAlgorithm(keyID, secretName, cmacme.HS256))
+
+		acmeIssuer, err = f.CertManagerClientSet.CertmanagerV1().Issuers(f.Namespace.Name).Create(
+			context.TODO(), acmeIssuer, metav1.CreateOptions{})
+		Expect(err).NotTo(HaveOccurred())
+
+		err = util.WaitForIssuerCondition(f.CertManagerClientSet.CertmanagerV1().Issuers(f.Namespace.Name),
+			acmeIssuer.Name,
+			v1.IssuerCondition{
+				Type:   v1.IssuerConditionReady,
+				Status: cmmeta.ConditionTrue,
+			})
+		Expect(err).NotTo(HaveOccurred())
+
+		By("removing the legacy keyAlgorithm value")
+
+		acmeIssuer, err = f.CertManagerClientSet.CertmanagerV1().Issuers(f.Namespace.Name).Get(context.TODO(), acmeIssuer.Name, metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+
+		acmeIssuer = gen.IssuerFrom(acmeIssuer,
+			gen.SetIssuerACMEEAB(keyID, secretName))
+
+		_, err = f.CertManagerClientSet.CertmanagerV1().Issuers(f.Namespace.Name).Update(context.TODO(), acmeIssuer, metav1.UpdateOptions{})
+		Expect(err).NotTo(HaveOccurred())
+
+		// TODO: we should use observedGeneration here, but currently it won't
+		// be incremented correctly in this scenario.
+		// Verify that Issuer's Ready condition remains True for 5 seconds.
+		err = wait.Poll(time.Millisecond*200, time.Second*5, func() (bool, error) {
+			iss, err := f.CertManagerClientSet.CertmanagerV1().Issuers(f.Namespace.Name).Get(
+				context.TODO(), issuerName, metav1.GetOptions{})
+			if err != nil {
+				return false, err
+			}
+			if !apiutil.IssuerHasCondition(iss, v1.IssuerCondition{
+				Type:   v1.IssuerConditionReady,
+				Status: cmmeta.ConditionTrue,
+			}) {
+				return false, errors.New("expected Ready condition to be true, got false")
+			}
+			// keep polling
+			return false, nil
+		})
+		Expect(err).To(HaveOccurred())
+		Expect(err).To(MatchError(wait.ErrWaitTimeout))
 	})
 })

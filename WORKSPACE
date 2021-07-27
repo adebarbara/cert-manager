@@ -31,7 +31,7 @@ go_rules_dependencies()
 
 go_register_toolchains(
     nogo = "@//hack/build:nogo_vet",
-    version = "1.16.2",
+    version = "1.16.6",
 )
 
 ## Load gazelle and dependencies
@@ -85,10 +85,6 @@ load("@io_bazel_rules_docker//repositories:pip_repositories.bzl", "pip_deps")
 
 pip_deps()
 
-load(
-    "@io_bazel_rules_docker//container:container.bzl",
-    "container_pull",
-)
 load("@io_bazel_rules_docker//go:image.bzl", _go_image_repos = "repositories")
 
 _go_image_repos()

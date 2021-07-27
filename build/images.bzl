@@ -15,11 +15,25 @@
 load("@io_bazel_rules_docker//container:container.bzl", "container_pull")
 
 def define_base_images():
-    ## Use 'static' distroless image for all builds
+    # Use 'static' distroless image for all builds by default.
+    # To get the latest-amd64 digest for gcr.io/distroless/static, assuming
+    # that $GOPATH/bin is in your $PATH, run:
+    # go get github.com/genuinetools/reg && reg digest gcr.io/distroless/static:latest-amd64
     container_pull(
         name = "static_base",
         registry = "gcr.io",
         repository = "distroless/static",
-        digest = "sha256:359e0c5c9a1364d82f567db01e1419dead4dfc04d33271248f9c713007d0c22e",
+        digest = "sha256:aadea1b1f16af043a34491eec481d0132479382096ea34f608087b4bef3634be",
     )
-
+    # Use 'dynamic' distroless image for modified cert-manager deployments that
+    # are dynamically linked. (This is not the default and you probably don't
+    # need this.)
+    # To get the latest-amd64 digest for gcr.io/distroless/base,
+    # assuming that $GOPATH/bin is in your $PATH, run:
+    # go get github.com/genuinetools/reg && reg digest gcr.io/distroless/base:latest-amd64
+    container_pull(
+        name = "dynamic_base",
+        registry = "gcr.io",
+        repository = "distroless/base",
+        digest = "sha256:7ee881c16507dafc507113b50728adc2bc0a232e7b7052301622660c99cf5702",
+    )

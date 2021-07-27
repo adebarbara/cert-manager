@@ -38,6 +38,7 @@ var (
 	certificateGvk = cmapi.SchemeGroupVersion.WithKind("Certificate")
 )
 
+// SecretsManager creates and updates secrets with certificate and key data.
 type SecretsManager struct {
 	kubeClient   kubernetes.Interface
 	secretLister corelisters.SecretLister
@@ -54,6 +55,9 @@ type SecretData struct {
 	PrivateKey, Certificate, CA []byte
 }
 
+// New returns a new SecretsManager. Setting enableSecretOwnerReferences to
+// true will mean that secrets will be deleted when the corresponding
+// Certificate is deleted.
 func New(
 	kubeClient kubernetes.Interface,
 	secretLister corelisters.SecretLister,
@@ -98,6 +102,7 @@ func (s *SecretsManager) UpdateData(ctx context.Context, crt *cmapi.Certificate,
 		secret.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(crt, certificateGvk)}
 	}
 
+	secret = secret.DeepCopy()
 	err = s.setValues(crt, secret, data)
 	if err != nil {
 		return err

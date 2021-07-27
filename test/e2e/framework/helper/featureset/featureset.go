@@ -39,10 +39,7 @@ func (fs FeatureSet) Add(f Feature) {
 
 // Delete removes a feature from the set
 func (fs FeatureSet) Delete(f Feature) {
-	_, ok := fs[f]
-	if ok {
-		delete(fs, f)
-	}
+	delete(fs, f)
 }
 
 // Contains returns true if the FeatureSet contains the given feature
@@ -83,12 +80,6 @@ const (
 	// will never pass tests that validate the duration is as expected.
 	DurationFeature Feature = "Duration"
 
-	// UsagesFeature denotes tests that set the 'usages' field to some
-	// custom value.
-	// Some issuers enforce key usages, meaning they
-	// will never pass tests that validate the duration is as expected.
-	UsagesFeature Feature = "Usages"
-
 	// WildcardsFeature denotes tests that request certificates for wildcard
 	// domains. Some issuer's disable wildcard certificate issuance, so this
 	// feature allows runs of the suite to exclude those tests that utilise
@@ -96,13 +87,11 @@ const (
 	WildcardsFeature Feature = "Wildcards"
 
 	// ECDSAFeature denotes whether the target issuer is able to sign
-	// certificates with an elliptic curve private key. This is useful for some
-	// issuers that have trouble being configured to support this feature.
+	// certificates with an elliptic curve private key.
 	ECDSAFeature Feature = "ECDSA"
 
 	// ReusePrivateKey denotes whether the target issuer is able to sign multiple
-	// certificates for the same private key. This is useful for some issuers
-	// that have trouble being configured to support this feature.
+	// certificates for the same private key.
 	ReusePrivateKeyFeature Feature = "ReusePrivateKey"
 
 	// URISANs denotes whether to the target issuer is able to sign a certificate
@@ -128,6 +117,18 @@ const (
 	OnlySAN = "OnlySAN"
 
 	// SaveCAToSecret denotes whether the target issuer returns a CA
-	// certificate which can be stored in the CA.crt field of the Secret.
+	// certificate which can be stored in the ca.crt field of the Secret.
 	SaveCAToSecret = "SaveCAToSecret"
+
+	// SaveRootCAToSecret denotes whether the CA certificate is expected to
+	// represent a root CA (sub-feature of SaveCAToSecret)
+	SaveRootCAToSecret = "SaveRootCAToSecret"
+
+	// Ed25519FeatureSet denotes whether the target issuer is able to sign
+	// certificates with an Ed25519 private key.
+	Ed25519FeatureSet Feature = "Ed25519"
+
+	// IssueCAFeature denotes whether the target issuer is able to issue CA
+	// certificates (i.e., certificates for which the CA basicConstraint is true)
+	IssueCAFeature Feature = "IssueCA"
 )

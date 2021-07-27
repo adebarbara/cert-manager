@@ -21,10 +21,10 @@ import (
 	"crypto"
 	"crypto/x509"
 
-	api "k8s.io/api/core/v1"
 	corev1 "k8s.io/api/core/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
 
+	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
 	"github.com/jetstack/cert-manager/pkg/util/errors"
 	"github.com/jetstack/cert-manager/pkg/util/pki"
 )
@@ -50,7 +50,7 @@ func SecretTLSKeyRef(ctx context.Context, secretLister corelisters.SecretLister,
 // secret with 'name' in 'namespace'. It will read the private key data from the secret
 // entry with name 'keyName'.
 func SecretTLSKey(ctx context.Context, secretLister corelisters.SecretLister, namespace, name string) (crypto.Signer, error) {
-	return SecretTLSKeyRef(ctx, secretLister, namespace, name, api.TLSPrivateKeyKey)
+	return SecretTLSKeyRef(ctx, secretLister, namespace, name, corev1.TLSPrivateKeyKey)
 }
 
 // ParseTLSKeyFromSecret will parse and decode a private key from the given
@@ -75,9 +75,9 @@ func SecretTLSCertChain(ctx context.Context, secretLister corelisters.SecretList
 		return nil, err
 	}
 
-	certBytes, ok := secret.Data[api.TLSCertKey]
+	certBytes, ok := secret.Data[corev1.TLSCertKey]
 	if !ok {
-		return nil, errors.NewInvalidData("no data for %q in secret '%s/%s'", api.TLSCertKey, namespace, name)
+		return nil, errors.NewInvalidData("no data for %q in secret '%s/%s'", corev1.TLSCertKey, namespace, name)
 	}
 
 	cert, err := pki.DecodeX509CertificateChainBytes(certBytes)
@@ -88,24 +88,50 @@ func SecretTLSCertChain(ctx context.Context, secretLister corelisters.SecretList
 	return cert, nil
 }
 
+// SecretTLSKeyPairAndCA returns the X.509 certificate chain and private key of
+// the leaf certificate contained in the target Secret. If the ca.crt field exists
+// on the Secret, it is parsed and added to the end of the certificate chain.
+func SecretTLSKeyPairAndCA(ctx context.Context, secretLister corelisters.SecretLister, namespace, name string) ([]*x509.Certificate, crypto.Signer, error) {
+	certs, key, err := SecretTLSKeyPair(ctx, secretLister, namespace, name)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	secret, err := secretLister.Secrets(namespace).Get(name)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	caBytes, ok := secret.Data[cmmeta.TLSCAKey]
+	if !ok || len(caBytes) == 0 {
+		return certs, key, nil
+	}
+	ca, err := pki.DecodeX509CertificateBytes(caBytes)
+	if err != nil {
+		return nil, key, errors.NewInvalidData(err.Error())
+	}
+
+	return append(certs, ca), key, nil
+}
+
 func SecretTLSKeyPair(ctx context.Context, secretLister corelisters.SecretLister, namespace, name string) ([]*x509.Certificate, crypto.Signer, error) {
 	secret, err := secretLister.Secrets(namespace).Get(name)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	keyBytes, ok := secret.Data[api.TLSPrivateKeyKey]
+	keyBytes, ok := secret.Data[corev1.TLSPrivateKeyKey]
 	if !ok {
-		return nil, nil, errors.NewInvalidData("no private key data for %q in secret '%s/%s'", api.TLSPrivateKeyKey, namespace, name)
+		return nil, nil, errors.NewInvalidData("no private key data for %q in secret '%s/%s'", corev1.TLSPrivateKeyKey, namespace, name)
 	}
 	key, err := pki.DecodePrivateKeyBytes(keyBytes)
 	if err != nil {
 		return nil, nil, errors.NewInvalidData(err.Error())
 	}
 
-	certBytes, ok := secret.Data[api.TLSCertKey]
+	certBytes, ok := secret.Data[corev1.TLSCertKey]
 	if !ok {
-		return nil, key, errors.NewInvalidData("no certificate data for %q in secret '%s/%s'", api.TLSCertKey, namespace, name)
+		return nil, key, errors.NewInvalidData("no certificate data for %q in secret '%s/%s'", corev1.TLSCertKey, namespace, name)
 	}
 	cert, err := pki.DecodeX509CertificateChainBytes(certBytes)
 	if err != nil {

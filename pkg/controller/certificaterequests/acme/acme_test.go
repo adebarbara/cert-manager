@@ -24,6 +24,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"math/big"
 	"net"
 	"reflect"
 	"testing"
@@ -111,6 +112,30 @@ func TestSign(t *testing.T) {
 		}),
 	)
 
+	rootPK, err := pki.GenerateECPrivateKey(256)
+	if err != nil {
+		t.Fatal()
+	}
+
+	rootTmpl := &x509.Certificate{
+		Version:               3,
+		BasicConstraintsValid: true,
+		SerialNumber:          big.NewInt(0),
+		Subject: pkix.Name{
+			CommonName: "root",
+		},
+		NotBefore: time.Now(),
+		NotAfter:  time.Now().Add(time.Minute),
+		KeyUsage:  x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		PublicKey: rootPK.Public(),
+		IsCA:      true,
+	}
+
+	_, rootCert, err := pki.SignCertificate(rootTmpl, rootTmpl, rootPK.Public(), rootPK)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	sk, err := pki.GenerateRSAPrivateKey(2048)
 	if err != nil {
 		t.Fatal(err)
@@ -158,7 +183,7 @@ func TestSign(t *testing.T) {
 		t.Errorf("error generating template: %v", err)
 	}
 
-	certPEM, _, err := pki.SignCSRTemplate([]*x509.Certificate{template}, sk, template)
+	certBundle, err := pki.SignCSRTemplate([]*x509.Certificate{rootCert}, rootPK, template)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +198,7 @@ func TestSign(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	certPEM2, _, err := pki.SignCSRTemplate([]*x509.Certificate{template}, sk, template2)
+	cert2Bundle, err := pki.SignCSRTemplate([]*x509.Certificate{rootCert}, rootPK, template2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,11 +227,29 @@ func TestSign(t *testing.T) {
 				CertManagerObjects: []runtime.Object{baseCRNotApproved.DeepCopy(), baseIssuer.DeepCopy()},
 			},
 		},
-		"a CertificateRequest with a denied condition should do nothing": {
+		"a CertificateRequest with a denied condition should update Ready condition with 'Denied'": {
 			certificateRequest: baseCRDenied.DeepCopy(),
 			builder: &testpkg.Builder{
 				KubeObjects:        []runtime.Object{},
 				CertManagerObjects: []runtime.Object{baseCRDenied.DeepCopy(), baseIssuer.DeepCopy()},
+				ExpectedEvents:     []string{},
+				ExpectedActions: []testpkg.Action{
+					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
+						"status",
+						gen.DefaultTestNamespace,
+						gen.CertificateRequestFrom(baseCRDenied,
+							gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+								Type:               cmapi.CertificateRequestConditionReady,
+								Status:             cmmeta.ConditionFalse,
+								Reason:             "Denied",
+								Message:            "The CertificateRequest was denied by an approval controller",
+								LastTransitionTime: &metaFixedClockStart,
+							}),
+							gen.SetCertificateRequestFailureTime(metaFixedClockStart),
+						),
+					)),
+				},
 			},
 		},
 		"a badly formed CSR should report failure": {
@@ -543,7 +586,7 @@ func TestSign(t *testing.T) {
 			builder: &testpkg.Builder{
 				CertManagerObjects: []runtime.Object{gen.OrderFrom(baseOrder,
 					gen.SetOrderState(cmacme.Valid),
-					gen.SetOrderCertificate(certPEM2),
+					gen.SetOrderCertificate(cert2Bundle.ChainPEM),
 				), baseCR.DeepCopy(), baseIssuer.DeepCopy()},
 				ExpectedActions: []testpkg.Action{
 					testpkg.NewAction(coretesting.NewDeleteAction(
@@ -563,7 +606,7 @@ func TestSign(t *testing.T) {
 				},
 				CertManagerObjects: []runtime.Object{gen.OrderFrom(baseOrder,
 					gen.SetOrderState(cmacme.Valid),
-					gen.SetOrderCertificate(certPEM),
+					gen.SetOrderCertificate(certBundle.ChainPEM),
 				), baseCR.DeepCopy(), baseIssuer.DeepCopy()},
 				ExpectedActions: []testpkg.Action{
 					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
@@ -578,7 +621,7 @@ func TestSign(t *testing.T) {
 								Message:            "Certificate fetched from issuer successfully",
 								LastTransitionTime: &metaFixedClockStart,
 							}),
-							gen.SetCertificateRequestCertificate(certPEM),
+							gen.SetCertificateRequestCertificate(certBundle.ChainPEM),
 						),
 					)),
 				},
@@ -615,10 +658,13 @@ func runTest(t *testing.T, test testT) {
 	}
 
 	controller := certificaterequests.New(apiutil.IssuerACME, ac)
-	controller.Register(test.builder.Context)
+	_, _, err := controller.Register(test.builder.Context)
+	if err != nil {
+		t.Errorf("Error registering the controller: %v", err)
+	}
 	test.builder.Start()
 
-	err := controller.Sync(context.Background(), test.certificateRequest)
+	err = controller.Sync(context.Background(), test.certificateRequest)
 	if err != nil && !test.expectedErr {
 		t.Errorf("expected to not get an error, but got: %v", err)
 	}
@@ -701,4 +747,54 @@ func Test_buildOrder(t *testing.T) {
 			}
 		})
 	}
+
+	longCrOne := gen.CertificateRequest(
+		"test-comparison-that-is-at-the-fifty-two-character-l",
+		gen.SetCertificateRequestDuration(&metav1.Duration{Duration: time.Hour}),
+		gen.SetCertificateRequestCSR(csrPEM))
+	orderOne, err := buildOrder(longCrOne, csr, false)
+	if err != nil {
+		t.Errorf("buildOrder() received error %v", err)
+		return
+	}
+
+	t.Run("Builds two orders from different long CRs to guarantee unique name", func(t *testing.T) {
+		longCrTwo := gen.CertificateRequest(
+			"test-comparison-that-is-at-the-fifty-two-character-l-two",
+			gen.SetCertificateRequestDuration(&metav1.Duration{Duration: time.Hour}),
+			gen.SetCertificateRequestCSR(csrPEM))
+
+		orderTwo, err := buildOrder(longCrTwo, csr, false)
+		if err != nil {
+			t.Errorf("buildOrder() received error %v", err)
+			return
+		}
+
+		if orderOne.Name == orderTwo.Name {
+			t.Errorf(
+				"orders built from different CR have equal names: %s == %s",
+				orderOne.Name,
+				orderTwo.Name)
+		}
+	})
+
+	t.Run("Builds two orders from the same long CRs to guarantee same name", func(t *testing.T) {
+		orderOne, err := buildOrder(longCrOne, csr, false)
+		if err != nil {
+			t.Errorf("buildOrder() received error %v", err)
+			return
+		}
+
+		orderTwo, err := buildOrder(longCrOne, csr, false)
+		if err != nil {
+			t.Errorf("buildOrder() received error %v", err)
+			return
+		}
+		if orderOne.Name != orderTwo.Name {
+			t.Errorf(
+				"orders built from the same CR have unequal names: %s != %s",
+				orderOne.Name,
+				orderTwo.Name)
+		}
+	})
 }

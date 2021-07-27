@@ -176,11 +176,29 @@ func TestSign(t *testing.T) {
 				CertManagerObjects: []runtime.Object{baseCRNotApproved.DeepCopy(), baseIssuer.DeepCopy()},
 			},
 		},
-		"a CertificateRequest with a denied condition should do nothing": {
+		"a CertificateRequest with a denied condition should update Ready condition with 'Denied'": {
 			certificateRequest: baseCRDenied.DeepCopy(),
 			builder: &testpkg.Builder{
 				KubeObjects:        []runtime.Object{},
 				CertManagerObjects: []runtime.Object{baseCRDenied.DeepCopy(), baseIssuer.DeepCopy()},
+				ExpectedEvents:     []string{},
+				ExpectedActions: []testpkg.Action{
+					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
+						cmapi.SchemeGroupVersion.WithResource("certificaterequests"),
+						"status",
+						gen.DefaultTestNamespace,
+						gen.CertificateRequestFrom(baseCRDenied,
+							gen.SetCertificateRequestStatusCondition(cmapi.CertificateRequestCondition{
+								Type:               cmapi.CertificateRequestConditionReady,
+								Status:             cmmeta.ConditionFalse,
+								Reason:             "Denied",
+								Message:            "The CertificateRequest was denied by an approval controller",
+								LastTransitionTime: &metaFixedClockStart,
+							}),
+							gen.SetCertificateRequestFailureTime(metaFixedClockStart),
+						),
+					)),
+				},
 			},
 		},
 		"no token, app role secret or kubernetes auth reference should report pending": {
@@ -514,7 +532,10 @@ func runTest(t *testing.T, test testT) {
 	}
 
 	controller := certificaterequests.New(apiutil.IssuerVault, vault)
-	controller.Register(test.builder.Context)
+	if _, _, err := controller.Register(test.builder.Context); err != nil {
+		t.Errorf("failed to register context with controller: %v", err)
+	}
+
 	test.builder.Start()
 
 	err := controller.Sync(context.Background(), test.certificateRequest)

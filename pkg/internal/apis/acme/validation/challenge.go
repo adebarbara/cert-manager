@@ -23,21 +23,27 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 
+	"github.com/jetstack/cert-manager/pkg/internal/api/validation"
 	cmacme "github.com/jetstack/cert-manager/pkg/internal/apis/acme"
 )
 
-func ValidateChallengeUpdate(_ *admissionv1.AdmissionRequest, oldObj, newObj runtime.Object) field.ErrorList {
+func ValidateChallengeUpdate(a *admissionv1.AdmissionRequest, oldObj, newObj runtime.Object) (field.ErrorList, validation.WarningList) {
 	old, ok := oldObj.(*cmacme.Challenge)
 	new := newObj.(*cmacme.Challenge)
 	// if oldObj is not set, the Update operation is always valid.
 	if !ok || old == nil {
-		return nil
+		return nil, nil
 	}
 
 	el := field.ErrorList{}
 	if !reflect.DeepEqual(old.Spec, new.Spec) {
 		el = append(el, field.Forbidden(field.NewPath("spec"), "challenge spec is immutable after creation"))
 	}
+	warnings := validateAPIVersion(a.RequestKind)
+	return el, warnings
+}
 
-	return el
+func ValidateChallenge(a *admissionv1.AdmissionRequest, obj runtime.Object) (field.ErrorList, validation.WarningList) {
+	warnings := validateAPIVersion(a.RequestKind)
+	return nil, warnings
 }

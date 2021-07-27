@@ -24,8 +24,8 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kubeinformers "k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -36,13 +36,19 @@ import (
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/clock"
+	gwapi "sigs.k8s.io/gateway-api/apis/v1alpha1"
+	gwclient "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
+	gwscheme "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned/scheme"
+	gwinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions"
 
 	"github.com/jetstack/cert-manager/cmd/controller/app/options"
+	cmdutil "github.com/jetstack/cert-manager/cmd/util"
 	"github.com/jetstack/cert-manager/pkg/acme/accounts"
 	clientset "github.com/jetstack/cert-manager/pkg/client/clientset/versioned"
 	intscheme "github.com/jetstack/cert-manager/pkg/client/clientset/versioned/scheme"
 	informers "github.com/jetstack/cert-manager/pkg/client/informers/externalversions"
 	"github.com/jetstack/cert-manager/pkg/controller"
+	shimgw "github.com/jetstack/cert-manager/pkg/controller/certificate-shim/gateways"
 	"github.com/jetstack/cert-manager/pkg/controller/clusterissuers"
 	dnsutil "github.com/jetstack/cert-manager/pkg/issuer/acme/dns/util"
 	logf "github.com/jetstack/cert-manager/pkg/logs"
@@ -58,7 +64,7 @@ const controllerAgentName = "cert-manager"
 const resyncPeriod = 10 * time.Hour
 
 func Run(opts *options.ControllerOptions, stopCh <-chan struct{}) {
-	rootCtx := util.ContextWithStopCh(context.Background(), stopCh)
+	rootCtx := cmdutil.ContextWithStopCh(context.Background(), stopCh)
 	rootCtx = logf.NewContext(rootCtx, nil, "controller")
 	log := logf.FromContext(rootCtx)
 
@@ -117,6 +123,7 @@ func Run(opts *options.ControllerOptions, stopCh <-chan struct{}) {
 		log.V(logf.DebugLevel).Info("starting shared informer factories")
 		ctx.SharedInformerFactory.Start(stopCh)
 		ctx.KubeSharedInformerFactory.Start(stopCh)
+		ctx.GWShared.Start(stopCh)
 		wg.Wait()
 		log.V(logf.InfoLevel).Info("control loops exited")
 		ctx.Metrics.Shutdown(metricsServer)
@@ -164,6 +171,28 @@ func buildControllerContext(ctx context.Context, stopCh <-chan struct{}, opts *o
 		return nil, nil, fmt.Errorf("error creating kubernetes client: %s", err.Error())
 	}
 
+	// cert-manager will try watching the Gateway resources with an exponential
+	// back-off, which allows the user to install the CRDs after cert-manager
+	// itself. Let's let the user know that the CRDs have not been found yet.
+	if opts.EnabledControllers().Has(shimgw.ControllerName) {
+		d := cl.Discovery()
+		resources, err := d.ServerResourcesForGroupVersion(gwapi.GroupVersion.String())
+		switch {
+		case apierrors.IsNotFound(err):
+			log.Info("the Gateway API CRDs do not seem to be present, cert-manager will keep retrying watching for them")
+		case err != nil:
+			return nil, nil, fmt.Errorf("while checking if the Gateway API CRD is installed: %s", err.Error())
+		case len(resources.APIResources) == 0:
+			log.Info("the Gateway API CRDs do not seem to be present, cert-manager will keep retrying watching for them")
+		}
+	}
+
+	// Create a GatewayAPI client.
+	gwcl, err := gwclient.NewForConfig(kubeCfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error creating kubernetes client: %s", err.Error())
+	}
+
 	nameservers := opts.DNS01RecursiveNameservers
 	if len(nameservers) == 0 {
 		nameservers = dnsutil.RecursiveNameservers
@@ -194,6 +223,7 @@ func buildControllerContext(ctx context.Context, stopCh <-chan struct{}, opts *o
 	// Add cert-manager types to the default Kubernetes Scheme so Events can be
 	// logged properly
 	intscheme.AddToScheme(scheme.Scheme)
+	gwscheme.AddToScheme(scheme.Scheme)
 	log.V(logf.DebugLevel).Info("creating event broadcaster")
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartLogging(logf.WithInfof(log.V(logf.DebugLevel)).Infof)
@@ -202,6 +232,7 @@ func buildControllerContext(ctx context.Context, stopCh <-chan struct{}, opts *o
 
 	sharedInformerFactory := informers.NewSharedInformerFactoryWithOptions(intcl, resyncPeriod, informers.WithNamespace(opts.Namespace))
 	kubeSharedInformerFactory := kubeinformers.NewSharedInformerFactoryWithOptions(cl, resyncPeriod, kubeinformers.WithNamespace(opts.Namespace))
+	gwSharedInformerFactory := gwinformers.NewSharedInformerFactoryWithOptions(gwcl, resyncPeriod, gwinformers.WithNamespace(opts.Namespace))
 
 	acmeAccountRegistry := accounts.NewDefaultRegistry()
 
@@ -211,12 +242,14 @@ func buildControllerContext(ctx context.Context, stopCh <-chan struct{}, opts *o
 		RESTConfig:                kubeCfg,
 		Client:                    cl,
 		CMClient:                  intcl,
+		GWClient:                  gwcl,
 		Recorder:                  recorder,
 		KubeSharedInformerFactory: kubeSharedInformerFactory,
 		SharedInformerFactory:     sharedInformerFactory,
+		GWShared:                  gwSharedInformerFactory,
 		Namespace:                 opts.Namespace,
 		Clock:                     clock.RealClock{},
-		Metrics:                   metrics.New(log),
+		Metrics:                   metrics.New(log, clock.RealClock{}),
 		ACMEOptions: controller.ACMEOptions{
 			HTTP01SolverImage:                 opts.ACMEHTTP01SolverImage,
 			HTTP01SolverResourceRequestCPU:    HTTP01SolverResourceRequestCPU,
@@ -240,7 +273,8 @@ func buildControllerContext(ctx context.Context, stopCh <-chan struct{}, opts *o
 			DefaultAutoCertificateAnnotations: opts.DefaultAutoCertificateAnnotations,
 		},
 		CertificateOptions: controller.CertificateOptions{
-			EnableOwnerRef: opts.EnableCertificateOwnerRef,
+			EnableOwnerRef:           opts.EnableCertificateOwnerRef,
+			CopiedAnnotationPrefixes: opts.CopiedAnnotationPrefixes,
 		},
 		SchedulerOptions: controller.SchedulerOptions{
 			MaxConcurrentChallenges: opts.MaxConcurrentChallenges,
@@ -258,22 +292,31 @@ func startLeaderElection(ctx context.Context, opts *options.ControllerOptions, l
 		os.Exit(1)
 	}
 
-	// Lock required for leader election
-	rl := resourcelock.ConfigMapLock{
-		ConfigMapMeta: metav1.ObjectMeta{
-			Namespace: opts.LeaderElectionNamespace,
-			Name:      "cert-manager-controller",
-		},
-		Client: leaderElectionClient.CoreV1(),
-		LockConfig: resourcelock.ResourceLockConfig{
-			Identity:      id + "-external-cert-manager-controller",
-			EventRecorder: recorder,
-		},
+	// Set up Multilock for leader election. This Multilock is here for the
+	// transitionary period from configmaps to leases see
+	// https://github.com/kubernetes-sigs/controller-runtime/pull/1144#discussion_r480173688
+	lockName := "cert-manager-controller"
+	lc := resourcelock.ResourceLockConfig{
+		Identity:      id + "-external-cert-manager-controller",
+		EventRecorder: recorder,
+	}
+	ml, err := resourcelock.New(resourcelock.ConfigMapsLeasesResourceLock,
+		opts.LeaderElectionNamespace,
+		lockName,
+		leaderElectionClient.CoreV1(),
+		leaderElectionClient.CoordinationV1(),
+		lc,
+	)
+	if err != nil {
+		// We should never get here.
+		log.Error(err, "error creating leader election lock")
+		os.Exit(1)
+
 	}
 
 	// Try and become the leader and start controller manager loops
 	leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
-		Lock:          &rl,
+		Lock:          ml,
 		LeaseDuration: opts.LeaderElectionLeaseDuration,
 		RenewDeadline: opts.LeaderElectionRenewDeadline,
 		RetryPeriod:   opts.LeaderElectionRetryPeriod,

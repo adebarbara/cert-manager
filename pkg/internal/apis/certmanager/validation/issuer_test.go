@@ -17,14 +17,22 @@ limitations under the License.
 package validation
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 
+	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 
+	cmapiv1 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
+	cmapiv1alpha2 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1alpha2"
+	cmapiv1alpha3 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1alpha3"
+	cmapiv1beta1 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1beta1"
+	"github.com/jetstack/cert-manager/pkg/internal/api/validation"
 	cmacme "github.com/jetstack/cert-manager/pkg/internal/apis/acme"
 	cmapi "github.com/jetstack/cert-manager/pkg/internal/apis/certmanager"
 	cmmeta "github.com/jetstack/cert-manager/pkg/internal/apis/meta"
@@ -41,6 +49,7 @@ var (
 		},
 		Key: "validkey",
 	}
+	// TODO (JS): Missing test for validCloudflareProvider
 	validCloudflareProvider = cmacme.ACMEIssuerDNS01ProviderCloudflare{
 		APIKey: &validSecretKeyRef,
 		Email:  "valid",
@@ -106,8 +115,9 @@ func TestValidateVaultIssuerConfig(t *testing.T) {
 func TestValidateACMEIssuerConfig(t *testing.T) {
 	fldPath := field.NewPath("")
 	scenarios := map[string]struct {
-		spec *cmacme.ACMEIssuer
-		errs []*field.Error
+		spec     *cmacme.ACMEIssuer
+		errs     []*field.Error
+		warnings validation.WarningList
 	}{
 		"valid acme issuer": {
 			spec: &validACMEIssuer,
@@ -146,7 +156,7 @@ func TestValidateACMEIssuerConfig(t *testing.T) {
 				},
 			},
 		},
-		"acme solver with empty external account binding fields": {
+		"acme solver with external account binding missing required fields": {
 			spec: &cmacme.ACMEIssuer{
 				Email:                  "valid-email",
 				Server:                 "valid-server",
@@ -164,8 +174,45 @@ func TestValidateACMEIssuerConfig(t *testing.T) {
 				field.Required(fldPath.Child("externalAccountBinding.keyID"), "the keyID field is required when using externalAccountBinding"),
 				field.Required(fldPath.Child("externalAccountBinding.keySecretRef.name"), "secret name is required"),
 				field.Required(fldPath.Child("externalAccountBinding.keySecretRef.key"), "secret key is required"),
-				field.Required(fldPath.Child("externalAccountBinding.keyAlgorithm"), "the keyAlgorithm field is required when using externalAccountBinding"),
 			},
+		},
+		"acme solver with a valid external account binding and keyAlgorithm not set": {
+			spec: &cmacme.ACMEIssuer{
+				Email:      "valid-email",
+				Server:     "valid-server",
+				PrivateKey: validSecretKeyRef,
+				ExternalAccountBinding: &cmacme.ACMEExternalAccountBinding{
+					KeyID: "test",
+					Key:   validSecretKeyRef,
+				},
+				Solvers: []cmacme.ACMEChallengeSolver{
+					{
+						DNS01: &cmacme.ACMEChallengeSolverDNS01{
+							CloudDNS: &validCloudDNSProvider,
+						},
+					},
+				},
+			},
+		},
+		"acme solver with a valid external account binding and keyAlgorithm set": {
+			spec: &cmacme.ACMEIssuer{
+				Email:      "valid-email",
+				Server:     "valid-server",
+				PrivateKey: validSecretKeyRef,
+				ExternalAccountBinding: &cmacme.ACMEExternalAccountBinding{
+					KeyID:        "test",
+					Key:          validSecretKeyRef,
+					KeyAlgorithm: cmacme.HS384,
+				},
+				Solvers: []cmacme.ACMEChallengeSolver{
+					{
+						DNS01: &cmacme.ACMEChallengeSolverDNS01{
+							CloudDNS: &validCloudDNSProvider,
+						},
+					},
+				},
+			},
+			warnings: validation.WarningList{deprecatedACMEEABKeyAlgorithmField},
 		},
 		"acme solver with missing http01 config type": {
 			spec: &cmacme.ACMEIssuer{
@@ -280,7 +327,7 @@ func TestValidateACMEIssuerConfig(t *testing.T) {
 	}
 	for n, s := range scenarios {
 		t.Run(n, func(t *testing.T) {
-			errs := ValidateACMEIssuerConfig(s.spec, fldPath)
+			errs, warnings := ValidateACMEIssuerConfig(s.spec, fldPath)
 			if len(errs) != len(s.errs) {
 				t.Errorf("Expected %v but got %v", s.errs, errs)
 				return
@@ -291,6 +338,7 @@ func TestValidateACMEIssuerConfig(t *testing.T) {
 					t.Errorf("Expected %v but got %v", expectedErr, e)
 				}
 			}
+			assert.Equal(t, s.warnings, warnings)
 		})
 	}
 }
@@ -298,8 +346,9 @@ func TestValidateACMEIssuerConfig(t *testing.T) {
 func TestValidateIssuerSpec(t *testing.T) {
 	fldPath := field.NewPath("")
 	scenarios := map[string]struct {
-		spec *cmapi.IssuerSpec
-		errs field.ErrorList
+		spec     *cmapi.IssuerSpec
+		errs     field.ErrorList
+		warnings validation.WarningList
 	}{
 		"valid ca issuer": {
 			spec: &cmapi.IssuerSpec{
@@ -391,8 +440,9 @@ func TestValidateIssuerSpec(t *testing.T) {
 	}
 	for n, s := range scenarios {
 		t.Run(n, func(t *testing.T) {
-			gotErrs := ValidateIssuerSpec(s.spec, fldPath)
+			gotErrs, warnings := ValidateIssuerSpec(s.spec, fldPath)
 			assert.Equal(t, s.errs, gotErrs)
+			assert.Equal(t, s.warnings, warnings)
 		})
 	}
 }
@@ -1079,6 +1129,193 @@ func TestValidateVenafiTPP(t *testing.T) {
 				expectedErr := s.errs[i]
 				if !reflect.DeepEqual(e, expectedErr) {
 					t.Errorf("Expected %v but got %v", expectedErr, e)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateIssuer(t *testing.T) {
+	baseIssuerConfig := cmapi.IssuerSpec{
+		IssuerConfig: cmapi.IssuerConfig{
+			SelfSigned: &cmapi.SelfSignedIssuer{},
+		}}
+	scenarios := map[string]struct {
+		cfg       *cmapi.Issuer
+		a         *admissionv1.AdmissionRequest
+		expectedE []*field.Error
+		expectedW validation.WarningList
+	}{
+		"v1alpha2 Issuer created": {
+			a: &admissionv1.AdmissionRequest{
+				RequestKind: &metav1.GroupVersionKind{Group: "cert-manager.io",
+					Version: "v1alpha2",
+					Kind:    "Issuer"},
+			},
+			cfg: &cmapi.Issuer{
+				Spec: baseIssuerConfig,
+			},
+			expectedE: []*field.Error{},
+			expectedW: validation.WarningList{
+				fmt.Sprintf(deprecationMessageTemplate,
+					cmapiv1alpha2.SchemeGroupVersion.String(),
+					"Issuer",
+					cmapiv1.SchemeGroupVersion.String(),
+					"Issuer"),
+			},
+		},
+		"v1alpha3 Issuer created": {
+			cfg: &cmapi.Issuer{
+				Spec: baseIssuerConfig,
+			},
+			a: &admissionv1.AdmissionRequest{
+				RequestKind: &metav1.GroupVersionKind{Group: "cert-manager.io",
+					Version: "v1alpha3",
+					Kind:    "Issuer"},
+			},
+			expectedE: []*field.Error{},
+			expectedW: validation.WarningList{
+				fmt.Sprintf(deprecationMessageTemplate,
+					cmapiv1alpha3.SchemeGroupVersion.String(),
+					"Issuer",
+					cmapiv1.SchemeGroupVersion.String(),
+					"Issuer"),
+			},
+		},
+		"v1beta1 Issuer created": {
+			cfg: &cmapi.Issuer{
+				Spec: baseIssuerConfig,
+			},
+			a: &admissionv1.AdmissionRequest{
+				RequestKind: &metav1.GroupVersionKind{Group: "cert-manager.io",
+					Version: "v1beta1",
+					Kind:    "Issuer"},
+			},
+			expectedE: []*field.Error{},
+			expectedW: validation.WarningList{
+				fmt.Sprintf(deprecationMessageTemplate,
+					cmapiv1beta1.SchemeGroupVersion.String(),
+					"Issuer",
+					cmapiv1.SchemeGroupVersion.String(),
+					"Issuer"),
+			},
+		},
+	}
+
+	for n, s := range scenarios {
+		t.Run(n, func(t *testing.T) {
+			gotE, gotW := ValidateIssuer(s.a, s.cfg)
+			if len(gotE) != len(s.expectedE) {
+				t.Fatalf("Expected errors %v but got %v", s.expectedE, gotE)
+			}
+			if len(gotW) != len(s.expectedW) {
+				t.Fatalf("Expected warnings %v but got %v", s.expectedE, gotE)
+			}
+			for i, e := range gotE {
+				expectedErr := s.expectedE[i]
+				if !reflect.DeepEqual(e, expectedErr) {
+					t.Errorf("Expected warnings %v but got %v", expectedErr, e)
+				}
+			}
+			for i, w := range gotW {
+				expectedWarning := s.expectedW[i]
+				if w != expectedWarning {
+					t.Errorf("Expected warning %q but got %q", expectedWarning, w)
+				}
+			}
+		})
+	}
+}
+
+func TestUpdateValidateIssuer(t *testing.T) {
+	baseIssuerConfig := cmapi.IssuerSpec{
+		IssuerConfig: cmapi.IssuerConfig{
+			SelfSigned: &cmapi.SelfSignedIssuer{},
+		}}
+	baseIssuer := cmapi.Issuer{
+		Spec: baseIssuerConfig,
+	}
+	scenarios := map[string]struct {
+		iss       *cmapi.Issuer
+		a         *admissionv1.AdmissionRequest
+		expectedE []*field.Error
+		expectedW validation.WarningList
+	}{
+		"Issuer updated to v1alpha2 version": {
+			iss: &cmapi.Issuer{
+				Spec: baseIssuerConfig,
+			},
+			a: &admissionv1.AdmissionRequest{
+				RequestKind: &metav1.GroupVersionKind{Group: "cert-manager.io",
+					Version: "v1alpha2",
+					Kind:    "Issuer"},
+			},
+			expectedE: []*field.Error{},
+			expectedW: validation.WarningList{
+				fmt.Sprintf(deprecationMessageTemplate,
+					cmapiv1alpha2.SchemeGroupVersion.String(),
+					"Issuer",
+					cmapiv1.SchemeGroupVersion.String(),
+					"Issuer"),
+			},
+		},
+		"Issuer updated to v1alpha3 version": {
+			iss: &cmapi.Issuer{
+				Spec: baseIssuerConfig,
+			},
+			a: &admissionv1.AdmissionRequest{
+				RequestKind: &metav1.GroupVersionKind{Group: "cert-manager.io",
+					Version: "v1alpha3",
+					Kind:    "Issuer"},
+			},
+			expectedE: []*field.Error{},
+			expectedW: validation.WarningList{
+				fmt.Sprintf(deprecationMessageTemplate,
+					cmapiv1alpha3.SchemeGroupVersion.String(),
+					"Issuer",
+					cmapiv1.SchemeGroupVersion.String(),
+					"Issuer"),
+			},
+		},
+		"Issuer updated to v1beta1 version": {
+			iss: &cmapi.Issuer{
+				Spec: baseIssuerConfig,
+			},
+			a: &admissionv1.AdmissionRequest{
+				RequestKind: &metav1.GroupVersionKind{Group: "cert-manager.io",
+					Version: "v1beta1",
+					Kind:    "Issuer"},
+			},
+			expectedE: []*field.Error{},
+			expectedW: validation.WarningList{
+				fmt.Sprintf(deprecationMessageTemplate,
+					cmapiv1beta1.SchemeGroupVersion.String(),
+					"Issuer",
+					cmapiv1.SchemeGroupVersion.String(),
+					"Issuer"),
+			},
+		},
+	}
+
+	for n, s := range scenarios {
+		t.Run(n, func(t *testing.T) {
+			gotE, gotW := ValidateUpdateIssuer(s.a, &baseIssuer, s.iss)
+			if len(gotE) != len(s.expectedE) {
+				t.Fatalf("Expected errors %v but got %v", s.expectedE, gotE)
+			}
+			if len(gotW) != len(s.expectedW) {
+				t.Fatalf("Expected warnings %v but got %v", s.expectedE, gotE)
+			}
+			for i, e := range gotE {
+				expectedErr := s.expectedE[i]
+				if !reflect.DeepEqual(e, expectedErr) {
+					t.Errorf("Expected warnings %v but got %v", expectedErr, e)
+				}
+			}
+			for i, w := range gotW {
+				expectedWarning := s.expectedW[i]
+				if w != expectedWarning {
+					t.Errorf("Expected warning %q but got %q", expectedWarning, w)
 				}
 			}
 		})

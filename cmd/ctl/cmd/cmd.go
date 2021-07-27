@@ -28,12 +28,14 @@ import (
 	// Load all auth plugins
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	"k8s.io/klog/v2"
-	cmdutil "k8s.io/kubectl/pkg/cmd/util"
+	"k8s.io/kubectl/pkg/cmd/util"
 
 	"github.com/jetstack/cert-manager/cmd/ctl/pkg/approve"
+	"github.com/jetstack/cert-manager/cmd/ctl/pkg/check"
 	"github.com/jetstack/cert-manager/cmd/ctl/pkg/convert"
 	"github.com/jetstack/cert-manager/cmd/ctl/pkg/create"
 	"github.com/jetstack/cert-manager/cmd/ctl/pkg/deny"
+	"github.com/jetstack/cert-manager/cmd/ctl/pkg/experimental"
 	"github.com/jetstack/cert-manager/cmd/ctl/pkg/inspect"
 	"github.com/jetstack/cert-manager/cmd/ctl/pkg/renew"
 	"github.com/jetstack/cert-manager/cmd/ctl/pkg/status"
@@ -51,9 +53,9 @@ kubectl cert-manager is a CLI tool manage and configure cert-manager resources f
 
 	kubeConfigFlags := genericclioptions.NewConfigFlags(true)
 	kubeConfigFlags.AddFlags(cmds.PersistentFlags())
-	matchVersionKubeConfigFlags := cmdutil.NewMatchVersionFlags(kubeConfigFlags)
+	matchVersionKubeConfigFlags := util.NewMatchVersionFlags(kubeConfigFlags)
 	matchVersionKubeConfigFlags.AddFlags(cmds.PersistentFlags())
-	factory := cmdutil.NewFactory(matchVersionKubeConfigFlags)
+	factory := util.NewFactory(matchVersionKubeConfigFlags)
 
 	cmds.Flags().AddGoFlagSet(flag.CommandLine)
 	flag.CommandLine.Parse([]string{})
@@ -73,6 +75,10 @@ kubectl cert-manager is a CLI tool manage and configure cert-manager resources f
 	cmds.AddCommand(inspect.NewCmdInspect(ctx, ioStreams, factory))
 	cmds.AddCommand(approve.NewCmdApprove(ctx, ioStreams, factory))
 	cmds.AddCommand(deny.NewCmdDeny(ctx, ioStreams, factory))
+	cmds.AddCommand(check.NewCmdCheck(ctx, ioStreams, factory))
+
+	// Experimental features
+	cmds.AddCommand(experimental.NewCmdExperimental(ctx, ioStreams, factory))
 
 	return cmds
 }

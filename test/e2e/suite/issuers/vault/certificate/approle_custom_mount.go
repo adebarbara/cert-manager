@@ -30,19 +30,31 @@ import (
 	"github.com/jetstack/cert-manager/test/e2e/framework"
 	"github.com/jetstack/cert-manager/test/e2e/framework/addon"
 	vaultaddon "github.com/jetstack/cert-manager/test/e2e/framework/addon/vault"
+	"github.com/jetstack/cert-manager/test/e2e/framework/helper/featureset"
+	"github.com/jetstack/cert-manager/test/e2e/framework/helper/validation"
 	"github.com/jetstack/cert-manager/test/e2e/util"
 	"github.com/jetstack/cert-manager/test/unit/gen"
 )
 
-var _ = framework.CertManagerDescribe("Vault Issuer Certificate (AppRole with a custom mount path)", func() {
-	runVaultCustomAppRoleTests(cmapi.IssuerKind)
+var _ = framework.CertManagerDescribe("Vault Issuer Certificate (AppRole with a custom mount path, CA without root)", func() {
+	fs := featureset.NewFeatureSet(featureset.SaveRootCAToSecret)
+	runVaultCustomAppRoleTests(cmapi.IssuerKind, false, fs)
 })
 
-var _ = framework.CertManagerDescribe("Vault ClusterIssuer Certificate (AppRole with a custom mount path)", func() {
-	runVaultCustomAppRoleTests(cmapi.ClusterIssuerKind)
+var _ = framework.CertManagerDescribe("Vault Issuer Certificate (AppRole with a custom mount path, CA with root)", func() {
+	fs := featureset.NewFeatureSet()
+	runVaultCustomAppRoleTests(cmapi.IssuerKind, true, fs)
+})
+var _ = framework.CertManagerDescribe("Vault ClusterIssuer Certificate (AppRole with a custom mount path, CA without root)", func() {
+	fs := featureset.NewFeatureSet(featureset.SaveRootCAToSecret)
+	runVaultCustomAppRoleTests(cmapi.ClusterIssuerKind, false, fs)
+})
+var _ = framework.CertManagerDescribe("Vault ClusterIssuer Certificate (AppRole with a custom mount path, CA with root)", func() {
+	fs := featureset.NewFeatureSet()
+	runVaultCustomAppRoleTests(cmapi.ClusterIssuerKind, true, fs)
 })
 
-func runVaultCustomAppRoleTests(issuerKind string) {
+func runVaultCustomAppRoleTests(issuerKind string, testWithRoot bool, unsupportedFeatures featureset.FeatureSet) {
 	f := framework.NewDefaultFramework("create-vault-certificate")
 
 	var (
@@ -83,6 +95,7 @@ func runVaultCustomAppRoleTests(issuerKind string) {
 			Details:           *vault.Details(),
 			RootMount:         rootMount,
 			IntermediateMount: intermediateMount,
+			ConfigureWithRoot: testWithRoot,
 			Role:              role,
 			AppRoleAuthPath:   authPath,
 		}
@@ -165,11 +178,11 @@ func runVaultCustomAppRoleTests(issuerKind string) {
 		Expect(err).NotTo(HaveOccurred())
 
 		By("Waiting for the Certificate to be issued...")
-		err = f.Helper().WaitCertificateIssued(f.Namespace.Name, certificateName, time.Minute*5)
+		_, err = f.Helper().WaitForCertificateReady(f.Namespace.Name, certificateName, time.Minute*5)
 		Expect(err).NotTo(HaveOccurred())
 
 		By("Validating the issued Certificate...")
-		err = f.Helper().ValidateCertificate(f.Namespace.Name, certificateName)
+		err = f.Helper().ValidateCertificate(f.Namespace.Name, certificateName, validation.CertificateSetForUnsupportedFeatureSet(unsupportedFeatures)...)
 		Expect(err).NotTo(HaveOccurred())
 	})
 }

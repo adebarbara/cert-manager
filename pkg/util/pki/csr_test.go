@@ -17,14 +17,20 @@ limitations under the License.
 package pki
 
 import (
+	"bytes"
+	"crypto"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"math/big"
 	"reflect"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	cmapi "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	v1 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
 	"github.com/jetstack/cert-manager/pkg/util"
 )
 
@@ -296,6 +302,12 @@ func TestSignatureAlgorithmForCertificate(t *testing.T) {
 			expectedKeyType: x509.ECDSA,
 		},
 		{
+			name:            "certificate with KeyAlgorithm Ed25519",
+			keyAlgo:         cmapi.Ed25519KeyAlgorithm,
+			expectedSigAlgo: x509.PureEd25519,
+			expectedKeyType: x509.Ed25519,
+		},
+		{
 			name:      "certificate with KeyAlgorithm ecdsa and size 100",
 			keyAlgo:   cmapi.ECDSAKeyAlgorithm,
 			keySize:   100,
@@ -486,13 +498,13 @@ func Test_buildKeyUsagesExtensionsForCertificate(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		crt     *v1.Certificate
+		crt     *cmapi.Certificate
 		want    []pkix.Extension
 		wantErr bool
 	}{
 		{
 			name: "Test no usages set",
-			crt:  &v1.Certificate{},
+			crt:  &cmapi.Certificate{},
 			want: []pkix.Extension{
 				{
 					Id:    OIDExtensionKeyUsage,
@@ -503,9 +515,9 @@ func Test_buildKeyUsagesExtensionsForCertificate(t *testing.T) {
 		},
 		{
 			name: "Test client auth extended usage set",
-			crt: &v1.Certificate{
-				Spec: v1.CertificateSpec{
-					Usages: []v1.KeyUsage{v1.UsageDigitalSignature, v1.UsageKeyEncipherment, v1.UsageClientAuth},
+			crt: &cmapi.Certificate{
+				Spec: cmapi.CertificateSpec{
+					Usages: []cmapi.KeyUsage{cmapi.UsageDigitalSignature, cmapi.UsageKeyEncipherment, cmapi.UsageClientAuth},
 				},
 			},
 			want: []pkix.Extension{
@@ -522,9 +534,9 @@ func Test_buildKeyUsagesExtensionsForCertificate(t *testing.T) {
 		},
 		{
 			name: "Test server + client auth extended usage set",
-			crt: &v1.Certificate{
-				Spec: v1.CertificateSpec{
-					Usages: []v1.KeyUsage{v1.UsageDigitalSignature, v1.UsageKeyEncipherment, v1.UsageServerAuth, v1.UsageClientAuth},
+			crt: &cmapi.Certificate{
+				Spec: cmapi.CertificateSpec{
+					Usages: []cmapi.KeyUsage{cmapi.UsageDigitalSignature, cmapi.UsageKeyEncipherment, cmapi.UsageServerAuth, cmapi.UsageClientAuth},
 				},
 			},
 			want: []pkix.Extension{
@@ -549,6 +561,199 @@ func Test_buildKeyUsagesExtensionsForCertificate(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("buildKeyUsagesExtensionsForCertificate() got = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSignCSRTemplate(t *testing.T) {
+	// We want to test the behavior of SignCSRTemplate in various contexts;
+	// for that, we construct a chain of four certificates:
+	// a root CA, two intermediate CA, and a leaf certificate.
+
+	mustCreatePair := func(issuerCert *x509.Certificate, issuerPK crypto.Signer, name string, isCA bool) ([]byte, *x509.Certificate, *x509.Certificate, crypto.Signer) {
+		pk, err := GenerateECPrivateKey(256)
+		require.NoError(t, err)
+		tmpl := &x509.Certificate{
+			Version:               3,
+			BasicConstraintsValid: true,
+			SerialNumber:          big.NewInt(0),
+			Subject: pkix.Name{
+				CommonName: name,
+			},
+			PublicKeyAlgorithm: x509.ECDSA,
+			NotBefore:          time.Now(),
+			NotAfter:           time.Now().Add(time.Minute),
+			KeyUsage:           x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+			PublicKey:          pk.Public(),
+			IsCA:               isCA,
+		}
+
+		if isCA {
+			tmpl.KeyUsage |= x509.KeyUsageCertSign
+		}
+
+		if issuerCert == nil {
+			issuerCert = tmpl
+		}
+		if issuerPK == nil {
+			issuerPK = pk
+		}
+
+		pem, cert, err := SignCertificate(tmpl, issuerCert, tmpl.PublicKey, issuerPK)
+		require.NoError(t, err)
+		return pem, cert, tmpl, pk
+	}
+
+	rootPEM, rootCert, rootTmpl, rootPK := mustCreatePair(nil, nil, "root", true)
+	int1PEM, int1Cert, int1Tmpl, int1PK := mustCreatePair(rootCert, rootPK, "int1", true)
+	int2PEM, int2Cert, int2Tmpl, int2PK := mustCreatePair(int1Cert, int1PK, "int2", true)
+	leafPEM, _, leafTmpl, _ := mustCreatePair(int2Cert, int2PK, "leaf", false)
+
+	tests := map[string]struct {
+		caCerts           []*x509.Certificate
+		caKey             crypto.Signer
+		template          *x509.Certificate
+		expectedCertPem   []byte
+		expectedCaCertPem []byte
+		wantErr           bool
+	}{
+		"Sign intermediate 1 template": {
+			caCerts:           []*x509.Certificate{rootCert},
+			caKey:             rootPK,
+			template:          int1Tmpl,
+			expectedCertPem:   int1PEM,
+			expectedCaCertPem: rootPEM,
+			wantErr:           false,
+		},
+		"Sign intermediate 2 template": {
+			caCerts:           []*x509.Certificate{int1Cert, rootCert},
+			caKey:             int1PK,
+			template:          int2Tmpl,
+			expectedCertPem:   append(int2PEM, int1PEM...),
+			expectedCaCertPem: rootPEM,
+			wantErr:           false,
+		},
+		"Sign leaf template": {
+			caCerts:           []*x509.Certificate{int2Cert, int1Cert, rootCert},
+			caKey:             int2PK,
+			template:          leafTmpl,
+			expectedCertPem:   append(append(leafPEM, int1PEM...), int2PEM...),
+			expectedCaCertPem: rootPEM,
+			wantErr:           false,
+		},
+		"Sign leaf template no root": {
+			caCerts:           []*x509.Certificate{int2Cert, int1Cert},
+			caKey:             int2PK,
+			template:          leafTmpl,
+			expectedCertPem:   append(leafPEM, int2PEM...),
+			expectedCaCertPem: int1PEM,
+			wantErr:           false,
+		},
+		"Error on no CA": {
+			caKey:    rootPK,
+			template: rootTmpl,
+			wantErr:  true,
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			actualBundle, err := SignCSRTemplate(test.caCerts, test.caKey, test.template)
+			if (err != nil) != test.wantErr {
+				t.Errorf("TestSignCSRTemplate() error = %v, wantErr %v", err, test.wantErr)
+				return
+			}
+
+			if !bytes.Equal(test.expectedCertPem, actualBundle.ChainPEM) {
+				// To help us identify where the mismatch is, we decode turn the
+				// into strings and do a textual diff.
+				expected, _ := DecodeX509CertificateBytes(test.expectedCertPem)
+				actual, _ := DecodeX509CertificateBytes(actualBundle.ChainPEM)
+
+				assert.Equal(t, expected.Subject.String(), actual.Subject.String())
+			}
+
+			if !bytes.Equal(test.expectedCaCertPem, actualBundle.CAPEM) {
+				// To help us identify where the mismatch is, we decode turn the
+				// into strings and do a textual diff.
+				expected, _ := DecodeX509CertificateBytes(test.expectedCaCertPem)
+				actual, _ := DecodeX509CertificateBytes(actualBundle.CAPEM)
+
+				assert.Equal(t, expected.Subject.String(), actual.Subject.String())
+			}
+		})
+	}
+}
+
+func TestEncodeX509Chain(t *testing.T) {
+	root := mustCreateBundle(t, nil, "root")
+	intA1 := mustCreateBundle(t, root, "intA-1")
+	intA2 := mustCreateBundle(t, intA1, "intA-2")
+	leafA1 := mustCreateBundle(t, intA1, "leaf-a1")
+	leafA2 := mustCreateBundle(t, intA2, "leaf-a2")
+	leafInterCN := mustCreateBundle(t, intA1, intA1.cert.Subject.CommonName)
+
+	tests := map[string]struct {
+		inputCerts []*x509.Certificate
+		expChain   []byte
+		expErr     bool
+	}{
+		"simple 3 cert chain should be encoded in the same order as passed, with no root": {
+			inputCerts: []*x509.Certificate{root.cert, intA1.cert, leafA1.cert},
+			expChain:   joinPEM(intA1.pem, leafA1.pem),
+			expErr:     false,
+		},
+		"simple 4 cert chain should be encoded in the same order as passed, with no root": {
+			inputCerts: []*x509.Certificate{root.cert, intA1.cert, intA2.cert, leafA2.cert},
+			expChain:   joinPEM(intA1.pem, intA2.pem, leafA2.pem),
+			expErr:     false,
+		},
+		"3 cert chain with no leaf be encoded in the same order as passed, with no root": {
+			inputCerts: []*x509.Certificate{root.cert, intA1.cert, intA2.cert},
+			expChain:   joinPEM(intA1.pem, intA2.pem),
+			expErr:     false,
+		},
+		"chain with a non-root cert where issuer matches subject should include that cert but not root": {
+			// see https://github.com/jetstack/cert-manager/issues/4142#issuecomment-884248923
+			inputCerts: []*x509.Certificate{root.cert, intA1.cert, leafInterCN.cert},
+			expChain:   joinPEM(intA1.pem, leafInterCN.pem),
+			expErr:     false,
+		},
+		"empty input chain should result in no output and no error": {
+			inputCerts: []*x509.Certificate{},
+			expChain:   []byte(""),
+			expErr:     false,
+		},
+		"chain with just a root should result in no output and no error": {
+			inputCerts: []*x509.Certificate{root.cert},
+			expChain:   []byte(""),
+			expErr:     false,
+		},
+		"chain with just a leaf should result in just the leaf": {
+			inputCerts: []*x509.Certificate{leafA1.cert},
+			expChain:   leafA1.pem,
+			expErr:     false,
+		},
+		"nil certs are ignored": {
+			inputCerts: []*x509.Certificate{leafA1.cert, nil},
+			expChain:   leafA1.pem,
+			expErr:     false,
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			chainOut, err := EncodeX509Chain(test.inputCerts)
+
+			if (err != nil) != test.expErr {
+				t.Errorf("unexpected error, exp=%t got=%v",
+					test.expErr, err)
+			}
+
+			if !reflect.DeepEqual(chainOut, test.expChain) {
+				t.Errorf("unexpected output from EncodeX509Chain, exp=%+s got=%+s",
+					test.expChain, chainOut)
 			}
 		})
 	}

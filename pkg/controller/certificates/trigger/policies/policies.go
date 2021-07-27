@@ -54,7 +54,7 @@ type Input struct {
 // in the 'reason' and 'message' return parameters if so.
 type Func func(Input) (reason, message string, reissue bool)
 
-// A chain of PolicyFuncs to be evaluated in order.
+// A Chain of PolicyFuncs to be evaluated in order.
 type Chain []Func
 
 // Evaluate will evaluate the entire policy chain using the provided input.
@@ -70,7 +70,7 @@ func (c Chain) Evaluate(input Input) (string, string, bool) {
 	return "", "", false
 }
 
-func NewTriggerPolicyChain(c clock.Clock, defaultRenewBeforeExpiryDuration time.Duration) Chain {
+func NewTriggerPolicyChain(c clock.Clock) Chain {
 	return Chain{
 		SecretDoesNotExist,
 		SecretIsMissingData,
@@ -78,7 +78,7 @@ func NewTriggerPolicyChain(c clock.Clock, defaultRenewBeforeExpiryDuration time.
 		SecretPrivateKeyMatchesSpec,
 		SecretIssuerAnnotationsNotUpToDate,
 		CurrentCertificateRequestNotValidForSpec,
-		CurrentCertificateNearingExpiry(c, defaultRenewBeforeExpiryDuration),
+		CurrentCertificateNearingExpiry(c),
 	}
 }
 
@@ -118,7 +118,7 @@ func SecretPublicKeysDiffer(input Input) (string, string, bool) {
 
 func SecretPrivateKeyMatchesSpec(input Input) (string, string, bool) {
 	if input.Secret.Data == nil || len(input.Secret.Data[corev1.TLSPrivateKeyKey]) == 0 {
-		return SecretMismatch, fmt.Sprintf("Existing issued Secret does not contain private key data"), true
+		return SecretMismatch, "Existing issued Secret does not contain private key data", true
 	}
 
 	pkBytes := input.Secret.Data[corev1.TLSPrivateKeyKey]
@@ -195,7 +195,7 @@ func currentSecretValidForSpec(input Input) (string, string, bool) {
 // CurrentCertificateNearingExpiry returns a policy function that can be used to
 // check whether an X.509 cert currently issued for a Certificate should be
 // renewed.
-func CurrentCertificateNearingExpiry(c clock.Clock, defaultRenewBeforeExpiryDuration time.Duration) Func {
+func CurrentCertificateNearingExpiry(c clock.Clock) Func {
 
 	return func(input Input) (string, string, bool) {
 
@@ -213,8 +213,7 @@ func CurrentCertificateNearingExpiry(c clock.Clock, defaultRenewBeforeExpiryDura
 		notBefore := metav1.NewTime(x509cert.NotBefore)
 		notAfter := metav1.NewTime(x509cert.NotAfter)
 		crt := input.Certificate
-		renewBefore := certificates.RenewBeforeExpiryDuration(notBefore.Time, notAfter.Time, crt.Spec.RenewBefore, defaultRenewBeforeExpiryDuration)
-		renewalTime := metav1.NewTime(notAfter.Add(-1 * renewBefore))
+		renewalTime := certificates.RenewalTime(notBefore.Time, notAfter.Time, crt.Spec.RenewBefore)
 
 		renewIn := renewalTime.Time.Sub(c.Now())
 		if renewIn > 0 {

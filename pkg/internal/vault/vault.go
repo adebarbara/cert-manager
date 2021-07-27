@@ -36,15 +36,22 @@ import (
 
 var _ Interface = &Vault{}
 
-type VaultClientBuilder func(namespace string, secretsLister corelisters.SecretLister,
+// ClientBuilder is a function type that returns a new Interface.
+// Can be used in tests to create a mock signer of Vault certificate requests.
+type ClientBuilder func(namespace string, secretsLister corelisters.SecretLister,
 	issuer v1.GenericIssuer) (Interface, error)
 
+// Interface implements various high level functionality related to connecting
+// with a Vault server, verifying its status and signing certificate request for
+// Vault's certificate.
+// TODO: Sys() is duplicated here and in Client interface
 type Interface interface {
 	Sign(csrPEM []byte, duration time.Duration) (certPEM []byte, caPEM []byte, err error)
 	Sys() *vault.Sys
 	IsVaultInitializedAndUnsealed() error
 }
 
+// Client implements functionality to talk to a Vault server.
 type Client interface {
 	NewRequest(method, requestPath string) *vault.Request
 	RawRequest(r *vault.Request) (*vault.Response, error)
@@ -53,6 +60,8 @@ type Client interface {
 	Sys() *vault.Sys
 }
 
+// Vault implements Interface and holds a Vault issuer, secrets lister and a
+// Vault client.
 type Vault struct {
 	secretsLister corelisters.SecretLister
 	issuer        v1.GenericIssuer
@@ -61,8 +70,11 @@ type Vault struct {
 	client Client
 }
 
-func New(namespace string, secretsLister corelisters.SecretLister,
-	issuer v1.GenericIssuer) (Interface, error) {
+// New returns a new Vault instance with the given namespace, issuer and
+// secrets lister.
+// Returned errors may be network failures and should be considered for
+// retrying.
+func New(namespace string, secretsLister corelisters.SecretLister, issuer v1.GenericIssuer) (Interface, error) {
 	v := &Vault{
 		secretsLister: secretsLister,
 		namespace:     namespace,
@@ -88,6 +100,7 @@ func New(namespace string, secretsLister corelisters.SecretLister,
 	return v, nil
 }
 
+// Sign will connect to a Vault instance to sign a certificate signing request.
 func (v *Vault) Sign(csrPEM []byte, duration time.Duration) (cert []byte, ca []byte, err error) {
 	csr, err := pki.DecodeX509CertificateRequestBytes(csrPEM)
 	if err != nil {
@@ -179,7 +192,7 @@ func (v *Vault) newConfig() (*vault.Config, error) {
 
 	caCertPool := x509.NewCertPool()
 	ok := caCertPool.AppendCertsFromPEM(certs)
-	if ok == false {
+	if !ok {
 		return nil, fmt.Errorf("error loading Vault CA bundle")
 	}
 
@@ -348,24 +361,22 @@ func extractCertificatesFromVaultCertificateSecret(secret *certutil.Secret) ([]b
 		return nil, nil, fmt.Errorf("failed to decode response returned by vault: %s", err)
 	}
 
-	bundle, err := parsedBundle.ToCertBundle()
+	vbundle, err := parsedBundle.ToCertBundle()
 	if err != nil {
 		return nil, nil, fmt.Errorf("unable to convert certificate bundle to PEM bundle: %s", err.Error())
 	}
 
-	var caPem []byte
-	if len(bundle.CAChain) > 0 {
-		caPem = []byte(bundle.CAChain[len(bundle.CAChain)-1])
-	} else {
-		caPem = []byte(bundle.IssuingCA)
+	bundle, err := pki.ParseSingleCertificateChainPEM([]byte(
+		strings.Join(append(
+			vbundle.CAChain,
+			vbundle.IssuingCA,
+			vbundle.Certificate,
+		), "\n")))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse certificate chain from vault: %w", err)
 	}
 
-	crtPems := []string{bundle.Certificate}
-	if len(bundle.CAChain) > 1 {
-		crtPems = append(crtPems, bundle.CAChain[0:len(bundle.CAChain)-1]...)
-	}
-
-	return []byte(strings.Join(crtPems, "\n")), caPem, nil
+	return bundle.ChainPEM, bundle.CAPEM, nil
 }
 
 func (v *Vault) IsVaultInitializedAndUnsealed() error {

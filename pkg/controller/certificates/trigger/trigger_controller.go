@@ -46,15 +46,7 @@ import (
 	"github.com/jetstack/cert-manager/pkg/util/predicate"
 )
 
-const (
-	ControllerName = "certificates-trigger"
-
-	// the amount of time after the LastFailureTime of a Certificate
-	// before the request should be retried.
-	// In future this should be replaced with a more dynamic exponential
-	// back-off algorithm.
-	retryAfterLastFailure = time.Hour
-)
+const ControllerName = "certificates-trigger"
 
 // This controller observes the state of the certificate's currently
 // issued `spec.secretName` and the rest of the `certificate.spec` fields to
@@ -132,6 +124,13 @@ func NewController(
 }
 
 func (c *controller) ProcessItem(ctx context.Context, key string) error {
+	// We don't want to leak goroutines, so let's remove this key from the
+	// scheduled queue in case it has been scheduled. We only need to
+	// un-schedule the key for 'Deleted' events, but ProcessItem does not allow
+	// us to distinguish between 'Added', 'Updated' and 'Deleted'. Note that
+	// there is no unit test around this.
+	c.scheduledWorkQueue.Forget(key)
+
 	log := logf.FromContext(ctx).WithValues("key", key)
 	ctx = logf.NewContext(ctx, log)
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
@@ -237,11 +236,11 @@ func shouldBackoffReissuingOnFailure(log logr.Logger, c clock.Clock, crt *cmapi.
 
 	now := c.Now()
 	durationSinceFailure := now.Sub(crt.Status.LastFailureTime.Time)
-	if durationSinceFailure >= retryAfterLastFailure {
+	if durationSinceFailure >= certificates.RetryAfterLastFailure {
 		log.V(logf.ExtendedInfoLevel).WithValues("since_failure", durationSinceFailure).Info("Certificate has been in failure state long enough, no need to back off")
 		return false, 0
 	}
-	return true, retryAfterLastFailure - durationSinceFailure
+	return true, certificates.RetryAfterLastFailure - durationSinceFailure
 }
 
 // scheduleRecheckOfCertificateIfRequired will schedule the resource with the
@@ -281,7 +280,7 @@ func (c *controllerWrapper) Register(ctx *controllerpkg.Context) (workqueue.Rate
 		ctx.SharedInformerFactory,
 		ctx.Recorder,
 		ctx.Clock,
-		policies.NewTriggerPolicyChain(ctx.Clock, cmapi.DefaultRenewBefore).Evaluate,
+		policies.NewTriggerPolicyChain(ctx.Clock).Evaluate,
 	)
 	c.controller = ctrl
 

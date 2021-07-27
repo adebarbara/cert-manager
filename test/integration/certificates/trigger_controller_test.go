@@ -25,6 +25,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/utils/clock"
 	fakeclock "k8s.io/utils/clock/testing"
 
 	apiutil "github.com/jetstack/cert-manager/pkg/api/util"
@@ -37,7 +38,6 @@ import (
 	logf "github.com/jetstack/cert-manager/pkg/logs"
 	"github.com/jetstack/cert-manager/pkg/metrics"
 	"github.com/jetstack/cert-manager/pkg/util/pki"
-	utilpki "github.com/jetstack/cert-manager/pkg/util/pki"
 	"github.com/jetstack/cert-manager/test/integration/framework"
 )
 
@@ -65,14 +65,12 @@ func TestTriggerController(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// default certificate renewBefore period
-	defaultRenewBefore := time.Hour * 24
-	shouldReissue := policies.NewTriggerPolicyChain(fakeClock, defaultRenewBefore).Evaluate
+	shouldReissue := policies.NewTriggerPolicyChain(fakeClock).Evaluate
 	ctrl, queue, mustSync := trigger.NewController(logf.Log, cmCl, factory, cmFactory, framework.NewEventRecorder(t), fakeClock, shouldReissue)
 	c := controllerpkg.NewController(
 		context.Background(),
 		"trigger_test",
-		metrics.New(logf.Log),
+		metrics.New(logf.Log, clock.RealClock{}),
 		ctrl.ProcessItem,
 		mustSync,
 		nil,
@@ -121,14 +119,11 @@ func TestTriggerController_RenewNearExpiry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.TODO(), time.Second*20)
 	defer cancel()
 
-	// default certificate renewBefore period
-	defaultRenewBefore := time.Hour * 24
-
 	fakeClock := &fakeclock.FakeClock{}
 	// Only use the 'current certificate nearing expiry' policy chain during the
 	// test as we want to test the very specific cases of triggering/not
 	// triggering depending on whether a renewal is required.
-	shoudReissue := policies.Chain{policies.CurrentCertificateNearingExpiry(fakeClock, defaultRenewBefore)}.Evaluate
+	shoudReissue := policies.Chain{policies.CurrentCertificateNearingExpiry(fakeClock)}.Evaluate
 	// Build, instantiate and run the trigger controller.
 	kubeClient, factory, cmCl, cmFactory := framework.NewClients(t, config)
 
@@ -160,11 +155,11 @@ func TestTriggerController_RenewNearExpiry(t *testing.T) {
 	}
 
 	// Create a private key for X.509 cert
-	sk, err := utilpki.GenerateRSAPrivateKey(2048)
+	sk, err := pki.GenerateRSAPrivateKey(2048)
 	if err != nil {
 		t.Fatal(err)
 	}
-	skBytes := utilpki.EncodePKCS1PrivateKey(sk)
+	skBytes := pki.EncodePKCS1PrivateKey(sk)
 	// Create an X.509 cert
 	x509CertBytes := selfSignCertificateWithNotBeforeAfter(t, skBytes, cert, notBefore.Time, notAfter.Time)
 	// Create a Secret with the X.509 cert
@@ -187,7 +182,7 @@ func TestTriggerController_RenewNearExpiry(t *testing.T) {
 	c := controllerpkg.NewController(
 		logf.NewContext(context.Background(), logf.Log, "trigger_controller_RenewNearExpiry"),
 		"trigger_test",
-		metrics.New(logf.Log),
+		metrics.New(logf.Log, clock.RealClock{}),
 		ctrl.ProcessItem,
 		mustSync,
 		nil,
@@ -223,7 +218,9 @@ func TestTriggerController_RenewNearExpiry(t *testing.T) {
 	someRenewalTime := metav1.NewTime(now)
 	cert.Status.RenewalTime = &someRenewalTime
 	cert, err = cmCl.CertmanagerV1().Certificates(namespace).UpdateStatus(ctx, cert, metav1.UpdateOptions{})
-
+	if err != nil {
+		t.Fatal(err)
+	}
 	err = wait.Poll(time.Millisecond*200, time.Second*2, func() (done bool, err error) {
 		c, err := cmCl.CertmanagerV1().Certificates(cert.Namespace).Get(ctx, cert.Name, metav1.GetOptions{})
 		if err != nil {

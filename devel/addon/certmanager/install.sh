@@ -22,6 +22,8 @@ set -o pipefail
 NAMESPACE="${NAMESPACE:-cert-manager}"
 # Release name to use with Helm
 RELEASE_NAME="${RELEASE_NAME:-cert-manager}"
+# Default feature gates to enable
+FEATURE_GATES="${FEATURE_GATES:-ExperimentalCertificateSigningRequestControllers=true}"
 
 SCRIPT_ROOT=$(dirname "${BASH_SOURCE}")
 source "${SCRIPT_ROOT}/../../lib/lib.sh"
@@ -29,6 +31,7 @@ SCRIPT_ROOT=$(dirname "${BASH_SOURCE}")
 
 # Require kubectl & helm available on PATH
 check_tool kubectl
+check_tool kubectl-cert_manager
 check_tool helm
 
 # Use the current timestamp as the APP_VERSION so a rolling update will be
@@ -50,6 +53,9 @@ kubectl get namespace "${NAMESPACE}" || kubectl create namespace "${NAMESPACE}"
 # Build the Helm chart package .tgz
 bazel build //deploy/charts/cert-manager
 
+# Pre-compile the kubectl plugin, so it can quickly check the api status
+bazel build //hack/bin:kubectl-cert_manager
+
 # Upgrade or install cert-manager
 helm upgrade \
     --install \
@@ -60,6 +66,8 @@ helm upgrade \
     --set webhook.image.tag="${APP_VERSION}" \
     --set installCRDs=true \
     --set featureGates="${FEATURE_GATES:-}" \
-    --set "extraArgs={--dns01-recursive-nameservers=${SERVICE_IP_PREFIX}.16:53,--dns01-recursive-nameservers-only=true}" \
+    --set "extraArgs={--dns01-recursive-nameservers=${SERVICE_IP_PREFIX}.16:53,--dns01-recursive-nameservers-only=true,--controllers=*\,gateway-shim}" \
     "$RELEASE_NAME" \
     "$REPO_ROOT/bazel-bin/deploy/charts/cert-manager/cert-manager.tgz"
+
+kubectl cert-manager check api --wait=1m -v

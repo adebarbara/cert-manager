@@ -19,6 +19,7 @@ package pki
 import (
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
@@ -72,6 +73,8 @@ func GeneratePrivateKeyForCertificate(crt *v1.Certificate) (crypto.Signer, error
 		}
 
 		return GenerateECPrivateKey(keySize)
+	case v1.Ed25519KeyAlgorithm:
+		return GenerateEd25519PrivateKey()
 	default:
 		return nil, fmt.Errorf("unsupported private key algorithm specified: %s", crt.Spec.PrivateKey.Algorithm)
 	}
@@ -111,6 +114,14 @@ func GenerateECPrivateKey(keySize int) (*ecdsa.PrivateKey, error) {
 	return ecdsa.GenerateKey(ecCurve, rand.Reader)
 }
 
+// GenerateEd25519PrivateKey will generate an Ed25519 private key
+func GenerateEd25519PrivateKey() (ed25519.PrivateKey, error) {
+
+	_, prvkey, err := ed25519.GenerateKey(rand.Reader)
+
+	return prvkey, err
+}
+
 // EncodePrivateKey will encode a given crypto.PrivateKey by first inspecting
 // the type of key encoding and then inspecting the type of key provided.
 // It only supports encoding RSA or ECDSA keys.
@@ -122,6 +133,8 @@ func EncodePrivateKey(pk crypto.PrivateKey, keyEncoding v1.PrivateKeyEncoding) (
 			return EncodePKCS1PrivateKey(k), nil
 		case *ecdsa.PrivateKey:
 			return EncodeECPrivateKey(k)
+		case ed25519.PrivateKey:
+			return EncodePKCS8PrivateKey(k)
 		default:
 			return nil, fmt.Errorf("error encoding private key: unknown key type: %T", pk)
 		}
@@ -169,75 +182,44 @@ func PublicKeyForPrivateKey(pk crypto.PrivateKey) (crypto.PublicKey, error) {
 		return k.Public(), nil
 	case *ecdsa.PrivateKey:
 		return k.Public(), nil
+	case ed25519.PrivateKey:
+		return k.Public(), nil
 	default:
 		return nil, fmt.Errorf("unknown private key type: %T", pk)
 	}
 }
 
-// PublicKeyMatchesCertificate can be used to verify the given public key
-// is the correct counter-part to the given x509 Certificate.
-// It will return false and no error if the public key is *not* valid for the
-// given Certificate.
-// It will return true if the public key *is* valid for the given Certificate.
-// It will return an error if either of the passed parameters are of an
-// unrecognised type (i.e. non RSA/ECDSA)
+// PublicKeyMatchesCertificate checks whether the given public key matches the
+// public key in the given x509.Certificate.
+// Returns false and no error if the public key is *not* the same as the certificate's key
+// Returns true and no error if the public key *is* the same as the certificate's key
+// Returns an error if the certificate's key type cannot be determined (i.e. non RSA/ECDSA keys)
 func PublicKeyMatchesCertificate(check crypto.PublicKey, crt *x509.Certificate) (bool, error) {
-	switch pub := crt.PublicKey.(type) {
-	case *rsa.PublicKey:
-		rsaCheck, ok := check.(*rsa.PublicKey)
-		if !ok {
-			return false, nil
-		}
-		if pub.N.Cmp(rsaCheck.N) != 0 {
-			return false, nil
-		}
-		return true, nil
-	case *ecdsa.PublicKey:
-		ecdsaCheck, ok := check.(*ecdsa.PublicKey)
-		if !ok {
-			return false, nil
-		}
-		if pub.X.Cmp(ecdsaCheck.X) != 0 || pub.Y.Cmp(ecdsaCheck.Y) != 0 {
-			return false, nil
-		}
-		return true, nil
-	default:
-		return false, fmt.Errorf("unrecognised Certificate public key type")
-	}
+	return PublicKeysEqual(crt.PublicKey, check)
 }
 
-// PublicKeyMatchesCSR can be used to verify the given public key is the correct
-// counter-part to the given x509 CertificateRequest.
-// It will return false and no error if the public key is *not* valid for the
-// given CertificateRequest.
-// It will return true if the public key *is* valid for the given CertificateRequest.
-// It will return an error if either of the passed parameters are of an
-// unrecognised type (i.e. non RSA/ECDSA)
+// PublicKeyMatchesCSR can be used to verify the given public key matches the
+// public key in the given x509.CertificateRequest.
+// Returns false and no error if the given public key is *not* the same as the CSR's key
+// Returns true and no error if the given public key *is* the same as the CSR's key
+// Returns an error if the CSR's key type cannot be determined (i.e. non RSA/ECDSA keys)
 func PublicKeyMatchesCSR(check crypto.PublicKey, csr *x509.CertificateRequest) (bool, error) {
-	return PublicKeysEqual(check, csr.PublicKey)
+	return PublicKeysEqual(csr.PublicKey, check)
 }
 
+// PublicKeysEqual compares two given public keys for equality.
+// The definition of "equality" depends on the type of the public keys.
+// Returns true if the keys are the same, false if they differ or an error if
+// the key type of `a` cannot be determined.
 func PublicKeysEqual(a, b crypto.PublicKey) (bool, error) {
 	switch pub := a.(type) {
 	case *rsa.PublicKey:
-		rsaCheck, ok := b.(*rsa.PublicKey)
-		if !ok {
-			return false, nil
-		}
-		if pub.N.Cmp(rsaCheck.N) != 0 {
-			return false, nil
-		}
-		return true, nil
+		return pub.Equal(b), nil
 	case *ecdsa.PublicKey:
-		ecdsaCheck, ok := b.(*ecdsa.PublicKey)
-		if !ok {
-			return false, nil
-		}
-		if pub.X.Cmp(ecdsaCheck.X) != 0 || pub.Y.Cmp(ecdsaCheck.Y) != 0 {
-			return false, nil
-		}
-		return true, nil
+		return pub.Equal(b), nil
+	case ed25519.PublicKey:
+		return pub.Equal(b), nil
 	default:
-		return false, fmt.Errorf("unrecognised public key type")
+		return false, fmt.Errorf("unrecognised public key type: %T", a)
 	}
 }

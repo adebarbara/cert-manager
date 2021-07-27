@@ -19,6 +19,7 @@ package certificates
 import (
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/rsa"
 	"fmt"
 	"reflect"
@@ -33,6 +34,15 @@ import (
 	"github.com/jetstack/cert-manager/pkg/util/pki"
 )
 
+// The amount of time after the LastFailureTime of a Certificate
+// before the request should be retried.
+// In future this should be replaced with a more dynamic exponential
+// back-off algorithm.
+const RetryAfterLastFailure = time.Hour
+
+// PrivateKeyMatchesSpec returns an error if the private key bit size
+// doesn't match the provided spec. RSA, Ed25519 and ECDSA are supported.
+// If any error is returned, a list of violations will also be returned.
 func PrivateKeyMatchesSpec(pk crypto.PrivateKey, spec cmapi.CertificateSpec) ([]string, error) {
 	spec = *spec.DeepCopy()
 	if spec.PrivateKey == nil {
@@ -41,6 +51,8 @@ func PrivateKeyMatchesSpec(pk crypto.PrivateKey, spec cmapi.CertificateSpec) ([]
 	switch spec.PrivateKey.Algorithm {
 	case "", cmapi.RSAKeyAlgorithm:
 		return rsaPrivateKeyMatchesSpec(pk, spec)
+	case cmapi.Ed25519KeyAlgorithm:
+		return ed25519PrivateKeyMatchesSpec(pk, spec)
 	case cmapi.ECDSAKeyAlgorithm:
 		return ecdsaPrivateKeyMatchesSpec(pk, spec)
 	default:
@@ -88,6 +100,15 @@ func ecdsaPrivateKeyMatchesSpec(pk crypto.PrivateKey, spec cmapi.CertificateSpec
 		violations = append(violations, "spec.keySize")
 	}
 	return violations, nil
+}
+
+func ed25519PrivateKeyMatchesSpec(pk crypto.PrivateKey, spec cmapi.CertificateSpec) ([]string, error) {
+	_, ok := pk.(ed25519.PrivateKey)
+	if !ok {
+		return []string{"spec.keyAlgorithm"}, nil
+	}
+
+	return nil, nil
 }
 
 // RequestMatchesSpec compares a CertificateRequest with a CertificateSpec
@@ -262,30 +283,30 @@ func GenerateLocallySignedTemporaryCertificate(crt *cmapi.Certificate, pkData []
 	return b, nil
 }
 
-//RenewalTimeFunc is a custom function type for calculating renewal time of a certificate
-type RenewalTimeFunc func(time.Time, time.Time, *cmapi.Certificate) *metav1.Time
+//RenewalTimeFunc is a custom function type for calculating renewal time of a certificate.
+type RenewalTimeFunc func(time.Time, time.Time, *metav1.Duration) *metav1.Time
 
-// RenewalTimeWrapper returns RenewalTimeFunc implementation
-// TODO: potentially merge RenewBeforeExpiryDuration into this function and rewrite the tests accordingly
-func RenewalTimeWrapper(defaultRenewBeforeExpiryDuration time.Duration) RenewalTimeFunc {
-	return func(notBefore, notAfter time.Time, cert *cmapi.Certificate) *metav1.Time {
-		renewBefore := RenewBeforeExpiryDuration(notBefore, notAfter, cert.Spec.RenewBefore, defaultRenewBeforeExpiryDuration)
-		rt := metav1.NewTime(notAfter.Add(-1 * renewBefore))
-		return &rt
-	}
+// RenewalTime calculates renewal time for a certificate. Default renewal time
+// is 2/3 through certificate's lifetime. If user has configured
+// spec.renewBefore, renewal time will be renewBefore period before expiry
+// (unless that is after the expiry).
+func RenewalTime(notBefore, notAfter time.Time, renewBeforeOverride *metav1.Duration) *metav1.Time {
 
-}
+	// 1. Calculate how long before expiry a cert should be renewed
 
-// RenewBeforeExpiryDuration will return the amount of time before the given
-// NotAfter time that the certificate should be renewed.
-func RenewBeforeExpiryDuration(notBefore, notAfter time.Time, specRenewBefore *metav1.Duration, defaultRenewBeforeExpiryDuration time.Duration) time.Duration {
-	renewBefore := defaultRenewBeforeExpiryDuration
-	if specRenewBefore != nil {
-		renewBefore = specRenewBefore.Duration
-	}
 	actualDuration := notAfter.Sub(notBefore)
-	if renewBefore >= actualDuration {
-		renewBefore = actualDuration / 3
+
+	renewBefore := actualDuration / 3
+
+	// If spec.renewBefore was set (and is less than duration)
+	// respect that. We don't want to prevent users from renewing
+	// longer lived certs more frequently.
+	if renewBeforeOverride != nil && renewBeforeOverride.Duration < actualDuration {
+		renewBefore = renewBeforeOverride.Duration
 	}
-	return renewBefore
+
+	// 2. Calculate when a cert should be renewed
+
+	rt := metav1.NewTime(notAfter.Add(-1 * renewBefore))
+	return &rt
 }

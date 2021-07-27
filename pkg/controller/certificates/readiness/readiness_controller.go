@@ -47,8 +47,10 @@ import (
 )
 
 const (
+	// ControllerName is the name of the certificate readiness controller.
 	ControllerName = "certificates-readiness"
-	ReadyReason    = "Ready"
+	// ReadyReason is the 'Ready' reason of a Certificate.
+	ReadyReason = "Ready"
 )
 
 type controller struct {
@@ -68,6 +70,7 @@ type controller struct {
 // readyConditionFunc is custom function type that builds certificate's Ready condition
 type policyEvaluatorFunc func(policies.Chain, policies.Input) cmapi.CertificateCondition
 
+// NewController returns a new certificate readiness controller.
 func NewController(
 	log logr.Logger,
 	client cmclient.Interface,
@@ -121,6 +124,9 @@ func NewController(
 	}, queue, mustSync
 }
 
+// ProcessItem is a worker function that will be called when a new key
+// corresponding to a Certificate to be re-synced is pulled from the workqueue.
+// ProcessItem will update the Ready condition of a Certificate.
 func (c *controller) ProcessItem(ctx context.Context, key string) error {
 	log := logf.FromContext(ctx).WithValues("key", key)
 
@@ -163,7 +169,8 @@ func (c *controller) ProcessItem(ctx context.Context, key string) error {
 
 		notBefore := metav1.NewTime(x509cert.NotBefore)
 		notAfter := metav1.NewTime(x509cert.NotAfter)
-		renewalTime := c.renewalTimeCalculator(x509cert.NotBefore, x509cert.NotAfter, crt)
+		renewBeforeHint := crt.Spec.RenewBefore
+		renewalTime := c.renewalTimeCalculator(x509cert.NotBefore, x509cert.NotAfter, renewBeforeHint)
 
 		//update Certificate's Status
 		crt.Status.NotBefore = &notBefore
@@ -235,7 +242,7 @@ func (c *controllerWrapper) Register(ctx *controllerpkg.Context) (workqueue.Rate
 		ctx.KubeSharedInformerFactory,
 		ctx.SharedInformerFactory,
 		NewReadinessPolicyChain(ctx.Clock),
-		certificates.RenewalTimeWrapper(cmapi.DefaultRenewBefore),
+		certificates.RenewalTime,
 		policyEvaluator,
 	)
 	c.controller = ctrl

@@ -30,6 +30,7 @@ import (
 
 	"github.com/jetstack/cert-manager/pkg/apis/acme"
 	"github.com/jetstack/cert-manager/pkg/apis/certmanager"
+	"github.com/jetstack/cert-manager/pkg/internal/api/validation"
 	cmapi "github.com/jetstack/cert-manager/pkg/internal/apis/certmanager"
 	cmmeta "github.com/jetstack/cert-manager/pkg/internal/apis/meta"
 	"github.com/jetstack/cert-manager/pkg/util"
@@ -38,16 +39,18 @@ import (
 
 var defaultInternalKeyUsages = []cmapi.KeyUsage{cmapi.UsageDigitalSignature, cmapi.UsageKeyEncipherment}
 
-func ValidateCertificateRequest(_ *admissionv1.AdmissionRequest, obj runtime.Object) field.ErrorList {
+func ValidateCertificateRequest(a *admissionv1.AdmissionRequest, obj runtime.Object) (field.ErrorList, validation.WarningList) {
 	cr := obj.(*cmapi.CertificateRequest)
 	allErrs := ValidateCertificateRequestSpec(&cr.Spec, field.NewPath("spec"), true)
 	allErrs = append(allErrs,
 		ValidateCertificateRequestApprovalCondition(cr.Status.Conditions, field.NewPath("status", "conditions"))...)
 
-	return allErrs
+	w := validateAPIVersion(a.RequestKind)
+
+	return allErrs, w
 }
 
-func ValidateUpdateCertificateRequest(_ *admissionv1.AdmissionRequest, oldObj, newObj runtime.Object) field.ErrorList {
+func ValidateUpdateCertificateRequest(a *admissionv1.AdmissionRequest, oldObj, newObj runtime.Object) (field.ErrorList, validation.WarningList) {
 	oldCR, newCR := oldObj.(*cmapi.CertificateRequest), newObj.(*cmapi.CertificateRequest)
 
 	var el field.ErrorList
@@ -65,8 +68,9 @@ func ValidateUpdateCertificateRequest(_ *admissionv1.AdmissionRequest, oldObj, n
 	if !reflect.DeepEqual(oldCR.Spec, newCR.Spec) {
 		el = append(el, field.Forbidden(field.NewPath("spec"), "cannot change spec after creation"))
 	}
+	w := validateAPIVersion(a.RequestKind)
 
-	return el
+	return el, w
 }
 
 func validateCertificateRequestAnnotations(objA, objB *cmapi.CertificateRequest, fieldPath *field.Path) field.ErrorList {
@@ -132,23 +136,27 @@ func ValidateCertificateRequestApprovalCondition(crConds []cmapi.CertificateRequ
 		}
 	}
 
-	for _, cond := range []struct {
-		condType   cmapi.CertificateRequestConditionType
-		conditions []cmapi.CertificateRequestCondition
+	for _, condType := range []struct {
+		condType cmapi.CertificateRequestConditionType
+		found    []cmapi.CertificateRequestCondition
 	}{
 		{cmapi.CertificateRequestConditionApproved, approvedConditions},
 		{cmapi.CertificateRequestConditionDenied, deniedConditions},
 	} {
-		switch len(cond.conditions) {
-		case 0:
-			break
-		case 1:
-			if condition := cond.conditions[0]; condition.Status != cmmeta.ConditionTrue {
-				el = append(el, field.Invalid(fldPath.Child(string(condition.Type)), condition.Status,
-					fmt.Sprintf("%q condition may only be set to True", cond.condType)))
-			}
-		default:
-			el = append(el, field.Forbidden(fldPath, fmt.Sprintf("multiple %q conditions present", cond.condType)))
+		if len(condType.found) == 0 {
+			continue
+		}
+
+		if len(condType.found) > 1 {
+			el = append(el, field.Forbidden(fldPath, fmt.Sprintf("multiple %q conditions present", condType.condType)))
+			continue
+		}
+
+		first := condType.found[0]
+		if first.Status != cmmeta.ConditionTrue {
+			el = append(el, field.Invalid(fldPath.Child(string(first.Type)), first.Status,
+				fmt.Sprintf("%q condition may only be set to True", condType.condType)))
+			continue
 		}
 	}
 

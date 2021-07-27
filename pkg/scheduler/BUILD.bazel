@@ -12,7 +12,10 @@ go_test(
     name = "go_default_test",
     srcs = ["scheduler_test.go"],
     embed = [":go_default_library"],
-    deps = ["@io_k8s_utils//clock:go_default_library"],
+    deps = [
+        "@com_github_stretchr_testify//assert:go_default_library",
+        "@io_k8s_utils//clock:go_default_library",
+    ],
 )
 
 filegroup(
@@ -24,7 +27,10 @@ filegroup(
 
 filegroup(
     name = "all-srcs",
-    srcs = [":package-srcs"],
+    srcs = [
+        ":package-srcs",
+        "//pkg/scheduler/test:all-srcs",
+    ],
     tags = ["automanaged"],
     visibility = ["//visibility:public"],
 )

@@ -39,8 +39,7 @@ var _ = framework.ConformanceDescribe("Certificates", func() {
 })
 var _ = framework.ConformanceDescribe("Certificates with External Account Binding", func() {
 	runACMEIssuerTests(&cmacme.ACMEExternalAccountBinding{
-		KeyID:        "kid-1",
-		KeyAlgorithm: "HS256",
+		KeyID: "kid-1",
 	})
 })
 
@@ -48,7 +47,6 @@ func runACMEIssuerTests(eab *cmacme.ACMEExternalAccountBinding) {
 	// unsupportedHTTP01Features is a list of features that are not supported by the ACME
 	// issuer type using HTTP01
 	var unsupportedHTTP01Features = featureset.NewFeatureSet(
-		featureset.IPAddressFeature,
 		featureset.DurationFeature,
 		featureset.WildcardsFeature,
 		featureset.URISANsFeature,
@@ -56,6 +54,7 @@ func runACMEIssuerTests(eab *cmacme.ACMEExternalAccountBinding) {
 		featureset.KeyUsagesFeature,
 		featureset.EmailSANsFeature,
 		featureset.SaveCAToSecret,
+		featureset.IssueCAFeature,
 	)
 
 	// unsupportedDNS01Features is a list of features that are not supported by the ACME
@@ -68,6 +67,7 @@ func runACMEIssuerTests(eab *cmacme.ACMEExternalAccountBinding) {
 		featureset.KeyUsagesFeature,
 		featureset.EmailSANsFeature,
 		featureset.SaveCAToSecret,
+		featureset.IssueCAFeature,
 	)
 
 	provisionerHTTP01 := &acmeIssuerProvisioner{
@@ -80,6 +80,7 @@ func runACMEIssuerTests(eab *cmacme.ACMEExternalAccountBinding) {
 
 	(&certificates.Suite{
 		Name:                "ACME HTTP01 Issuer",
+		UseIngressIPAddress: true,
 		CreateIssuerFunc:    provisionerHTTP01.createHTTP01Issuer,
 		DeleteIssuerFunc:    provisionerHTTP01.delete,
 		UnsupportedFeatures: unsupportedHTTP01Features,
@@ -95,6 +96,7 @@ func runACMEIssuerTests(eab *cmacme.ACMEExternalAccountBinding) {
 
 	(&certificates.Suite{
 		Name:                "ACME HTTP01 ClusterIssuer",
+		UseIngressIPAddress: true,
 		CreateIssuerFunc:    provisionerHTTP01.createHTTP01ClusterIssuer,
 		DeleteIssuerFunc:    provisionerHTTP01.delete,
 		UnsupportedFeatures: unsupportedHTTP01Features,

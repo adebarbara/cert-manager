@@ -41,9 +41,13 @@ import (
 )
 
 const (
+	// CRControllerName is the string used to refer to
+	// this controller when enabling or disabling it from
+	// command line flags.
 	CRControllerName = "certificaterequests-issuer-acme"
 )
 
+// ACME is a controller that implements `certificaterequests.Issuer`.
 type ACME struct {
 	// used to record Events about resources to the API
 	recorder      record.EventRecorder
@@ -67,6 +71,7 @@ func init() {
 	})
 }
 
+// NewACME returns a configured controller.
 func NewACME(ctx *controllerpkg.Context) *ACME {
 	return &ACME{
 		recorder:      ctx.Recorder,
@@ -77,6 +82,12 @@ func NewACME(ctx *controllerpkg.Context) *ACME {
 	}
 }
 
+// Sign returns a CA, certificate and Key from an ACME CA.
+//
+// If no order exists for a CertificateRequest, an order is constructed
+// and sent back to the Kubernetes API server for processing.
+// The order controller then processes the order. The CertificateRequest
+// is then updated with the result.
 func (a *ACME) Sign(ctx context.Context, cr *v1.CertificateRequest, issuer v1.GenericIssuer) (*issuerpkg.IssueResponse, error) {
 	log := logf.FromContext(ctx, "sign")
 
@@ -201,7 +212,6 @@ func (a *ACME) Sign(ctx context.Context, cr *v1.CertificateRequest, issuer v1.Ge
 	return &issuerpkg.IssueResponse{
 		Certificate: order.Status.Certificate,
 	}, nil
-
 }
 
 // Build order. If we error here it is a terminating failure.
@@ -231,7 +241,22 @@ func buildOrder(cr *v1.CertificateRequest, csr *x509.CertificateRequest, enableD
 	computeNameSpec := spec.DeepCopy()
 	// create a deep copy of the OrderSpec so we can overwrite the Request and NotAfter field
 	computeNameSpec.Request = nil
-	name, err := apiutil.ComputeName(cr.Name, computeNameSpec)
+
+	var hashObj interface{}
+	hashObj = computeNameSpec
+	if len(cr.Name) >= 52 {
+		// Pass a unique struct for hashing so that names at or longer than 52 characters
+		// receive a unique hash. Otherwise, orders will have truncated names with colliding
+		// hashes, possibly leading to non-renewal.
+		hashObj = struct {
+			CRName string            `json:"certificateRequestName"`
+			Spec   *cmacme.OrderSpec `json:"spec"`
+		}{
+			CRName: cr.Name,
+			Spec:   computeNameSpec,
+		}
+	}
+	name, err := apiutil.ComputeName(cr.Name, hashObj)
 	if err != nil {
 		return nil, err
 	}
@@ -241,9 +266,10 @@ func buildOrder(cr *v1.CertificateRequest, csr *x509.CertificateRequest, enableD
 	// the hyphen.
 	return &cmacme.Order{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        name,
-			Namespace:   cr.Namespace,
-			Labels:      cr.Labels,
+			Name:      name,
+			Namespace: cr.Namespace,
+			Labels:    cr.Labels,
+			// Annotations include the filtered annotations copied from the Certificate.
 			Annotations: cr.Annotations,
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(cr, v1.SchemeGroupVersion.WithKind(v1.CertificateRequestKind)),

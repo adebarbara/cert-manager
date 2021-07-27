@@ -28,6 +28,8 @@ import (
 	cm "github.com/jetstack/cert-manager/pkg/apis/certmanager"
 	challengescontroller "github.com/jetstack/cert-manager/pkg/controller/acmechallenges"
 	orderscontroller "github.com/jetstack/cert-manager/pkg/controller/acmeorders"
+	shimgatewaycontroller "github.com/jetstack/cert-manager/pkg/controller/certificate-shim/gateways"
+	shimingresscontroller "github.com/jetstack/cert-manager/pkg/controller/certificate-shim/ingresses"
 	cracmecontroller "github.com/jetstack/cert-manager/pkg/controller/certificaterequests/acme"
 	crapprovercontroller "github.com/jetstack/cert-manager/pkg/controller/certificaterequests/approver"
 	crcacontroller "github.com/jetstack/cert-manager/pkg/controller/certificaterequests/ca"
@@ -41,10 +43,17 @@ import (
 	"github.com/jetstack/cert-manager/pkg/controller/certificates/requestmanager"
 	"github.com/jetstack/cert-manager/pkg/controller/certificates/revisionmanager"
 	"github.com/jetstack/cert-manager/pkg/controller/certificates/trigger"
+	csracmecontroller "github.com/jetstack/cert-manager/pkg/controller/certificatesigningrequests/acme"
+	csrcacontroller "github.com/jetstack/cert-manager/pkg/controller/certificatesigningrequests/ca"
+	csrselfsignedcontroller "github.com/jetstack/cert-manager/pkg/controller/certificatesigningrequests/selfsigned"
+	csrvaultcontroller "github.com/jetstack/cert-manager/pkg/controller/certificatesigningrequests/vault"
+	csrvenaficontroller "github.com/jetstack/cert-manager/pkg/controller/certificatesigningrequests/venafi"
 	clusterissuerscontroller "github.com/jetstack/cert-manager/pkg/controller/clusterissuers"
-	ingressshimcontroller "github.com/jetstack/cert-manager/pkg/controller/ingress-shim"
 	issuerscontroller "github.com/jetstack/cert-manager/pkg/controller/issuers"
+	"github.com/jetstack/cert-manager/pkg/feature"
+	logf "github.com/jetstack/cert-manager/pkg/logs"
 	"github.com/jetstack/cert-manager/pkg/util"
+	utilfeature "github.com/jetstack/cert-manager/pkg/util/feature"
 )
 
 type ControllerOptions struct {
@@ -97,6 +106,11 @@ type ControllerOptions struct {
 	EnablePprof bool
 
 	DNS01CheckRetryPeriod time.Duration
+
+	// Annotations copied Certificate -> CertificateRequest,
+	// CertificateRequest -> Order. Slice of string literals that are
+	// treated as prefixes for annotation keys.
+	CopiedAnnotationPrefixes []string
 }
 
 const (
@@ -144,7 +158,8 @@ var (
 		issuerscontroller.ControllerName,
 		clusterissuerscontroller.ControllerName,
 		certificatesmetricscontroller.ControllerName,
-		ingressshimcontroller.ControllerName,
+		shimingresscontroller.ControllerName,
+		shimgatewaycontroller.ControllerName,
 		orderscontroller.ControllerName,
 		challengescontroller.ControllerName,
 		cracmecontroller.CRControllerName,
@@ -162,7 +177,43 @@ var (
 		revisionmanager.ControllerName,
 	}
 
-	defaultEnabledControllers = []string{"*"}
+	defaultEnabledControllers = []string{
+		issuerscontroller.ControllerName,
+		clusterissuerscontroller.ControllerName,
+		certificatesmetricscontroller.ControllerName,
+		shimingresscontroller.ControllerName,
+		orderscontroller.ControllerName,
+		challengescontroller.ControllerName,
+		cracmecontroller.CRControllerName,
+		crapprovercontroller.ControllerName,
+		crcacontroller.CRControllerName,
+		crselfsignedcontroller.CRControllerName,
+		crvaultcontroller.CRControllerName,
+		crvenaficontroller.CRControllerName,
+		// certificate controllers
+		trigger.ControllerName,
+		issuing.ControllerName,
+		keymanager.ControllerName,
+		requestmanager.ControllerName,
+		readiness.ControllerName,
+		revisionmanager.ControllerName,
+	}
+
+	experimentalCertificateSigningRequestControllers = []string{
+		csracmecontroller.CSRControllerName,
+		csrcacontroller.CSRControllerName,
+		csrselfsignedcontroller.CSRControllerName,
+		csrvenaficontroller.CSRControllerName,
+		csrvaultcontroller.CSRControllerName,
+	}
+	// Annotations that will be copied from Certificate to CertificateRequest and to Order.
+	// By default, copy all annotations except for the ones applied by kubectl, fluxcd, argocd.
+	defaultCopiedAnnotationPrefixes = []string{
+		"*",
+		"-kubectl.kubernetes.io/",
+		"-fluxcd.io/",
+		"-argocd.argoproj.io/",
+	}
 )
 
 func NewControllerOptions() *ControllerOptions {
@@ -226,7 +277,7 @@ func (s *ControllerOptions) AddFlags(fs *pflag.FlagSet) {
 		"The duration the clients should wait between attempting acquisition and renewal "+
 		"of a leadership. This is only applicable if leader election is enabled.")
 
-	fs.StringSliceVar(&s.controllers, "controllers", defaultEnabledControllers, fmt.Sprintf(""+
+	fs.StringSliceVar(&s.controllers, "controllers", []string{"*"}, fmt.Sprintf(""+
 		"A list of controllers to enable. '--controllers=*' enables all "+
 		"on-by-default controllers, '--controllers=foo' enables just the controller "+
 		"named 'foo', '--controllers=*,-foo' disables the controller named "+
@@ -282,9 +333,15 @@ func (s *ControllerOptions) AddFlags(fs *pflag.FlagSet) {
 			"DNS01 check requests. This should be a list containing host and port, "+
 			"for example 8.8.8.8:53,8.8.4.4:53")
 	fs.MarkDeprecated("dns01-self-check-nameservers", "Deprecated in favour of dns01-recursive-nameservers")
+
 	fs.BoolVar(&s.EnableCertificateOwnerRef, "enable-certificate-owner-ref", defaultEnableCertificateOwnerRef, ""+
 		"Whether to set the certificate resource as an owner of secret where the tls certificate is stored. "+
 		"When this flag is enabled, the secret will be automatically removed when the certificate resource is deleted.")
+	fs.StringSliceVar(&s.CopiedAnnotationPrefixes, "copied-annotation-prefixes", defaultCopiedAnnotationPrefixes, "Specify which annotations should/shouldn't be copied"+
+		"from Certificate to CertificateRequest and Order, as well as from CertificateSigningRequest to Order, by passing a list of annotation key prefixes."+
+		"A prefix starting with a dash(-) specifies an annotation that shouldn't be copied. Example: '*,-kubectl.kuberenetes.io/'- all annotations"+
+		"will be copied apart from the ones where the key is prefixed with 'kubectl.kubernetes.io/'.")
+
 	fs.IntVar(&s.MaxConcurrentChallenges, "max-concurrent-challenges", defaultMaxConcurrentChallenges, ""+
 		"The maximum number of challenges that can be scheduled as 'processing' at once.")
 	fs.DurationVar(&s.DNS01CheckRetryPeriod, "dns01-check-retry-period", defaultDNS01CheckRetryPeriod, ""+
@@ -352,7 +409,7 @@ func (o *ControllerOptions) EnabledControllers() sets.String {
 	for _, controller := range o.controllers {
 		switch {
 		case controller == "*":
-			enabled = enabled.Insert(allControllers...)
+			enabled = enabled.Insert(defaultEnabledControllers...)
 		case strings.HasPrefix(controller, "-"):
 			disabled = append(disabled, strings.TrimPrefix(controller, "-"))
 		default:
@@ -361,6 +418,11 @@ func (o *ControllerOptions) EnabledControllers() sets.String {
 	}
 
 	enabled = enabled.Delete(disabled...)
+
+	if utilfeature.DefaultFeatureGate.Enabled(feature.ExperimentalCertificateSigningRequestControllers) {
+		logf.Log.Info("enabling all experimental certificatesigningrequest controllers")
+		enabled = enabled.Insert(experimentalCertificateSigningRequestControllers...)
+	}
 
 	return enabled
 }

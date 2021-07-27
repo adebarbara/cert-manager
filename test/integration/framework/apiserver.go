@@ -36,33 +36,18 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	webhooktesting "github.com/jetstack/cert-manager/cmd/webhook/app/testing"
 	"github.com/jetstack/cert-manager/pkg/api"
 	apitesting "github.com/jetstack/cert-manager/pkg/api/testing"
+	"github.com/jetstack/cert-manager/test/internal/apiserver"
 )
-
-func init() {
-	// Set environment variables for controller-runtime's envtest package.
-	// This is done once as we cannot scope environment variables to a single
-	// invocation of RunControlPlane due to envtest's design.
-	setUpEnvTestEnv()
-}
 
 type StopFunc func()
 
 func RunControlPlane(t *testing.T) (*rest.Config, StopFunc) {
-	// Here we start the API server so its address can be given to the webhook on
-	// start. We then restart the API with the CRDs in the webhook.
-	env := &envtest.Environment{
-		AttachControlPlaneOutput: false,
-	}
-
-	config, err := env.Start()
-	if err != nil {
-		t.Fatalf("failed to start control plane: %v", err)
-	}
+	env, stopFn := apiserver.RunBareControlPlane(t)
+	config := env.Config
 
 	if err := env.Stop(); err != nil {
 		t.Fatal(err)
@@ -77,9 +62,8 @@ func RunControlPlane(t *testing.T) (*rest.Config, StopFunc) {
 	patchCRDConversion(crds, webhookOpts.URL, webhookOpts.CAPEM)
 
 	env.CRDs = crdsToRuntimeObjects(crds)
-	env.Config = config
 
-	config, err = env.Start()
+	config, err := env.Start()
 	if err != nil {
 		t.Fatalf("failed to start control plane: %v", err)
 	}
@@ -103,9 +87,7 @@ func RunControlPlane(t *testing.T) (*rest.Config, StopFunc) {
 
 	return config, func() {
 		defer stopWebhook()
-		if err := env.Stop(); err != nil {
-			t.Logf("failed to shut down control plane, not failing test: %v", err)
-		}
+		stopFn()
 	}
 }
 
@@ -199,17 +181,17 @@ func readCRDsAtPath(codec runtime.Codec, converter runtime.ObjectConvertor, path
 	return crds, nil
 }
 
-func crdsToRuntimeObjects(in []*v1.CustomResourceDefinition) []runtime.Object {
-	out := make([]runtime.Object, len(in))
+func crdsToRuntimeObjects(in []*v1.CustomResourceDefinition) []client.Object {
+	out := make([]client.Object, len(in))
 
 	for i, crd := range in {
-		out[i] = runtime.Object(crd)
+		out[i] = client.Object(crd)
 	}
 
 	return out
 }
 
-func getValidatingWebhookConfig(url string, caPEM []byte) runtime.Object {
+func getValidatingWebhookConfig(url string, caPEM []byte) client.Object {
 	failurePolicy := admissionregistrationv1beta1.Fail
 	sideEffects := admissionregistrationv1beta1.SideEffectClassNone
 	validateURL := fmt.Sprintf("%s/validate", url)
@@ -246,7 +228,7 @@ func getValidatingWebhookConfig(url string, caPEM []byte) runtime.Object {
 	return &webhook
 }
 
-func getMutatingWebhookConfig(url string, caPEM []byte) runtime.Object {
+func getMutatingWebhookConfig(url string, caPEM []byte) client.Object {
 	failurePolicy := admissionregistrationv1beta1.Fail
 	sideEffects := admissionregistrationv1beta1.SideEffectClassNone
 	validateURL := fmt.Sprintf("%s/mutate", url)
